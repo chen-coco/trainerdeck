@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>TrainerDeckBridge</AssemblyName>
+    <RootNamespace>TrainerDeckBridge</RootNamespace>
+    <OutputType>Library</OutputType>
+    <Platforms>AnyCPU</Platforms>
+    <TargetFramework>net35</TargetFramework>
+    <Version>0.6.7</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\BridgeManifest.cs" Link="Protocol\BridgeManifest.cs" />
+    <Compile Include="..\Shared\FrameworkCompat.cs" Link="Compatibility\FrameworkCompat.cs" />
+    <Compile Include="..\Shared\JsonCodec.cs" Link="Protocol\JsonCodec.cs" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net35"
+                      Version="1.0.3"
+                      PrivateAssets="all" />
+  </ItemGroup>
+</Project>

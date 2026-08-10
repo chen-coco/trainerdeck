@@ -1,0 +1,16 @@
+{
+  "protocol": 1,
+  "host": "127.0.0.1",
+  "port": 37123,
+  "token": "replace-with-at-least-32-random-characters",
+  "app_id": 2072450,
+  "trainer_sha256": "",
+  "trainer_relative": "Like-a-Dragon-Infinite-Wealth-FLiNG.exe",
+  "cacheDirectory": "",
+  "pollIntervalMs": 250,
+  "connectTimeoutMs": 3000,
+  "maxFrameBytes": 1048576,
+  "resourceType": "UI",
+  "resourceId": 101,
+  "resourceLanguage": 0
+}
