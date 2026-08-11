@@ -2,18 +2,12 @@
 
 TrainerDeck 是一个面向 Steam Deck 游戏模式的 Decky Loader 插件。它可以识别当前游戏、搜索和下载独立 FLiNG 修改器、管理 Steam 启动项，并把受支持修改器的控制菜单同步到 Decky 快捷面板。
 
-当前版本：**0.6.9**。项目仍处于实验阶段，建议先了解下面的兼容性和安全限制，再在自己的设备上使用。
-
 ## 主要功能
 
 - 自动识别当前运行的 Steam 游戏或非 Steam 快捷方式。
 - 手动使用中文或英文搜索 FLiNG 修改器；可选择开启当前游戏的自动搜索与添加。
-- 下载 ZIP 或 EXE，安全解压并保留原始修改器文件名。
-- 将修改器绑定到对应的 Steam 库条目，同时备份原启动参数。
-- 检测常见 CheatDeck 单程序配置；只有满足安全条件时才接管，解除绑定后可以恢复原配置。
-- 对受支持的 WPF/WinForms 修改器提供 Decky 控制面板，支持开关、数值输入和一次性动作。
-- 通过修改器核心回执确认操作结果，不使用模拟键盘事件猜测状态。
-- 保留原修改器窗口，可以在原窗口和 Decky 面板之间双向同步。
+- 将修改器绑定到对应的 Steam 库条目，添加CheatDeck启动参数。
+- 对风灵月影新版本(19年+)修改器提供 Decky 控制面板，支持开关、数值输入和一次性动作。
 - 提供启动项一键恢复；恢复启动项不会删除已下载的修改器。
 
 ## 工作方式
@@ -39,35 +33,17 @@ Bridge 会在运行时准备修改器的缓存副本，不覆盖下载的原始 
 - 首次完成绑定后，需要退出并重新启动游戏，修改器才会跟随新的 Steam 启动项运行。
 - 当前支持 ZIP 和直接 EXE；RAR 不受支持。
 
-TrainerDeck 与 FLiNG、CheatDeck、Game Cheats Manager、Valve、Steam 或 WeMod 均无隶属或授权关系。
-
 ## 安装
 
 ### 使用发布包
 
 1. 安装 Decky Loader 3.0 或更高版本。
-2. 从 [Releases](https://github.com/chen-coco/trainerdeck/releases) 下载 `TrainerDeck-0.6.9.zip`。如果尚未提供预构建包，请按“从源码构建”生成。
+2. 从 [Releases](https://github.com/chen-coco/trainerdeck/releases) 下载 `TrainerDeck-<verison>.zip`。如果尚未提供预构建包，请按“从源码构建”生成。
 3. 把 ZIP 传到 Steam Deck，例如 `~/Downloads/`。
 4. 打开 Decky 设置的“开发者”页面，选择“从 ZIP 安装插件”。
 5. 选择 ZIP 后重新加载插件或重启 Decky Loader。
 
-不要使用 GitHub 自动生成的“Source code”压缩包代替插件安装包。正确的 ZIP 内部应直接包含：
-
-```text
-TrainerDeck/plugin.json
-```
-
-而不是多套一层 `TrainerDeck/TrainerDeck/` 目录。
-
-### 手动安装
-
-也可以在 Steam Deck 桌面模式中把安装包解压到：
-
-```text
-/home/deck/homebrew/plugins/TrainerDeck
-```
-
-安装后应能看到 `/home/deck/homebrew/plugins/TrainerDeck/plugin.json`，然后返回游戏模式并重新加载 Decky 插件。
+不要使用 GitHub 自动生成的“Source code”压缩包代替插件安装包。
 
 ## 基本使用
 
@@ -173,11 +149,6 @@ TrainerDeck/
 | `tests/` | Python、Node.js 和 Bridge 回归测试 |
 | `docs/` | 架构、安全边界和同步协议说明 |
 
-更深入的实现说明：
-
-- [架构与安全边界](docs/ARCHITECTURE.md)
-- [FLiNG 菜单双向同步](docs/FLING_BIDIRECTIONAL_SYNC.md)
-- [Bridge 协议与构建](bridge/README.md)
 
 ## 参与开发
 
