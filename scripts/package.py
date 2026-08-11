@@ -26,6 +26,7 @@ ROOT_FILES = [
     Path("package.json"),
     Path("plugin.json"),
     Path("README.md"),
+    Path("README_EN.md"),
     Path("LICENSE"),
     Path("docs/ARCHITECTURE.md"),
     Path("docs/FLING_BIDIRECTIONAL_SYNC.md"),
