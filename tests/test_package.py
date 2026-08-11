@@ -12,6 +12,9 @@ class DeckyPackageTests(unittest.TestCase):
     def test_release_version_is_consistent(self):
         main_source = (package.ROOT / "main.py").read_text(encoding="utf-8")
         readme = (package.ROOT / "README.md").read_text(encoding="utf-8")
+        english_readme = (package.ROOT / "README_EN.md").read_text(
+            encoding="utf-8"
+        )
         core_source = (package.ROOT / "trainerdeck_core.py").read_text(
             encoding="utf-8"
         )
@@ -19,8 +22,27 @@ class DeckyPackageTests(unittest.TestCase):
         self.assertIn(f'"version": "{package.VERSION}"', main_source)
         self.assertIn(f"TrainerDeck-{package.VERSION}.zip", readme)
         self.assertIn(
+            f"TrainerDeck-{package.VERSION}.zip",
+            english_readme,
+        )
+        self.assertIn(
             f'PLUGIN_VERSION = "{package.VERSION}"',
             core_source,
+        )
+
+    def test_readme_language_switch_is_bidirectional(self):
+        readme = (package.ROOT / "README.md").read_text(encoding="utf-8")
+        english_readme = (package.ROOT / "README_EN.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "**简体中文** | [English](README_EN.md)",
+            readme,
+        )
+        self.assertIn(
+            "[简体中文](README.md) | **English**",
+            english_readme,
         )
 
     def test_archive_uses_decky_layout_and_python_module_path(self):
@@ -46,6 +68,7 @@ class DeckyPackageTests(unittest.TestCase):
                     "TrainerDeck/py_modules/trainerdeck_runtime.py",
                     names,
                 )
+                self.assertIn("TrainerDeck/README_EN.md", names)
                 self.assertIn(
                     "TrainerDeck/bin/bridge/TrainerDeckBridge.dll",
                     names,
