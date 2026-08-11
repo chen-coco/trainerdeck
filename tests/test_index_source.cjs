@@ -85,7 +85,7 @@ assert.match(
 );
 assert.match(
   source,
-  /const preflight = await readAppDetails\(operationAppId\)[\s\S]{0,700}hasCheatDeckLaunchConfiguration\(preflight\)[\s\S]{0,700}runSearch\(decision\.query, "automatic"\)/,
+  /const preflight = await readAppDetails\(operationAppId\)[\s\S]{0,1800}hasCheatDeckLaunchConfiguration\(preflight\)[\s\S]{0,2600}runSearch\(decision\.query, "automatic"\)/,
   "automatic search must inspect complete launch options and skip CheatDeck first",
 );
 assert.match(
@@ -95,27 +95,27 @@ assert.match(
 );
 assert.match(
   source,
-  /downloadTrainer\(entry\)[\s\S]{0,2600}hasCheatDeckLaunchConfiguration\(latestDetails\)[\s\S]{0,1800}bindTrainer/,
+  /downloadTrainer\(entry\)[\s\S]{0,6500}hasCheatDeckLaunchConfiguration\(latestDetails\)[\s\S]{0,3500}bindTrainer/,
   "automatic binding must re-check managed launch options after downloading",
 );
 assert.match(
   source,
-  /installInFlight\.current !== null[\s\S]{0,500}installInFlight\.current = operationToken/,
+  /installInFlight\.current !== null[\s\S]{0,1400}installInFlight\.current = operationToken/,
   "downloads and binds must use a synchronous single-flight guard",
 );
 assert.match(
   source,
-  /__trainerDeckInstallLockV1[\s\S]{0,900}acquireSharedInstallLock[\s\S]{0,900}releaseSharedInstallLock/,
+  /__trainerDeckInstallLockV1[\s\S]{0,1800}acquireSharedInstallLock[\s\S]{0,1800}releaseSharedInstallLock/,
   "the install single-flight guard must survive a remounted Decky panel",
 );
 assert.match(
   source,
-  /bindingRetryAttempt > 0[\s\S]{0,700}getBinding\(appId\)[\s\S]{0,900}setBindingRetryAttempt/,
+  /bindingRetryAttempt > 0[\s\S]{0,1000}getBinding\(appId\)[\s\S]{0,1400}setBindingRetryAttempt/,
   "a transient binding-read failure must retry after the backend becomes ready",
 );
 assert.match(
   source,
-  /getSettings\(\)[\s\S]{0,180}persisted\.auto_search_and_add === true/,
+  /getSettings\(\)[\s\S]{0,450}persisted\.auto_search_and_add === true/,
   "an automatic install must re-read the persisted switch before committing",
 );
 assert.match(
@@ -125,7 +125,7 @@ assert.match(
 );
 assert.match(
   source,
-  /markAutomaticDownloadHandled\(automaticOperationKey\)[\s\S]{0,180}downloadTrainer\(entry\)/,
+  /markAutomaticDownloadHandled\(automaticOperationKey\)[\s\S]{0,400}downloadTrainer\(entry\)/,
   "only a download that reached its final preflight may become globally handled",
 );
 

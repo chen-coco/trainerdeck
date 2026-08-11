@@ -1,6 +1,7 @@
 import { fetchNoCors } from "@decky/api";
 import { Router, type Unregisterable } from "@decky/ui";
 
+import { t } from "./i18n";
 import type {
   SteamStoreCandidate,
   SteamTarget,
@@ -126,7 +127,7 @@ async function fetchNoCorsWithTimeout(
     });
   } catch (error) {
     if (timedOut && !externalSignal?.aborted) {
-      throw new Error("在线搜索请求超时");
+      throw new Error(t("在线搜索请求超时", "Online search request timed out"));
     }
     throw error;
   } finally {
@@ -339,7 +340,10 @@ async function searchTranslationMemory(
         signal,
       );
       if (!response.ok) {
-        throw new Error(`在线跨语言搜索返回 HTTP ${response.status}`);
+        throw new Error(t(
+          `在线跨语言搜索返回 HTTP ${response.status}`,
+          `Online cross-language search returned HTTP ${response.status}`,
+        ));
       }
       const payload = (await response.json()) as {
         responseData?: { translatedText?: unknown; match?: unknown };
@@ -388,7 +392,10 @@ async function searchTranslationMemory(
     const rejected = settled.find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
-    throw rejected?.reason ?? new Error("在线跨语言搜索失败");
+    throw rejected?.reason ?? new Error(t(
+      "在线跨语言搜索失败",
+      "Online cross-language search failed",
+    ));
   }
   return uniqueOnlineCandidates(values);
 }
@@ -417,7 +424,10 @@ async function searchWikimediaEnglishNames(
     signal,
   );
   if (!response.ok) {
-    throw new Error(`Wikimedia 搜索返回 HTTP ${response.status}`);
+    throw new Error(t(
+      `Wikimedia 搜索返回 HTTP ${response.status}`,
+      `Wikimedia search returned HTTP ${response.status}`,
+    ));
   }
   const payload = (await response.json()) as {
     query?: {
@@ -799,7 +809,10 @@ export async function resolveManualSteamSearchPlan(
       if (signal?.aborted) {
         throw error;
       }
-      warnings.push("Steam 英文候选暂不可用，已直接搜索 FLiNG。");
+      warnings.push(t(
+        "Steam 英文候选暂不可用，已直接搜索 FLiNG。",
+        "Steam English candidates are temporarily unavailable. Searching FLiNG directly.",
+      ));
     }
     const plan: TrainerSearchPlan = {
       originalQuery,
@@ -876,7 +889,7 @@ export async function resolveManualSteamSearchPlan(
   if (signal?.aborted) {
     throw translationResult.status === "rejected"
       ? translationResult.reason
-      : new Error("搜索已取消");
+      : new Error(t("搜索已取消", "Search cancelled"));
   }
   const translated =
     translationResult.status === "fulfilled" ? translationResult.value : [];
@@ -891,12 +904,18 @@ export async function resolveManualSteamSearchPlan(
     ...wikimedia,
   ]);
   if (translationResult.status === "rejected" && wikimedia.length) {
-    warnings.push("在线翻译不可用，已使用 Wikimedia 跨语言结果。");
+    warnings.push(t(
+      "在线翻译不可用，已使用 Wikimedia 跨语言结果。",
+      "Online translation is unavailable. Wikimedia cross-language results are being used.",
+    ));
   }
   if (!onlineCandidates.length) {
     const plan = {
       ...empty,
-      warnings: ["在线搜索没有解析出英文游戏名，请尝试更完整的中文名或英文名。"],
+      warnings: [t(
+        "在线搜索没有解析出英文游戏名，请尝试更完整的中文名或英文名。",
+        "Online search could not resolve an English game name. Try a more complete Chinese or English name.",
+      )],
     };
     return plan;
   }
@@ -907,7 +926,7 @@ export async function resolveManualSteamSearchPlan(
     (candidate) => searchSteamStoreCandidates(candidate.name, "english", signal),
   );
   if (signal?.aborted) {
-    throw new Error("搜索已取消");
+    throw new Error(t("搜索已取消", "Search cancelled"));
   }
   const allSteamCandidates: SteamStoreCandidate[] = [];
   const seedQueries: TrainerSearchQuery[] = [];
@@ -929,7 +948,10 @@ export async function resolveManualSteamSearchPlan(
     steamResults.every((result) => result.status === "rejected") &&
     seedQueries.length
   ) {
-    warnings.push("Steam 英文候选扩展失败，已直接使用在线解析结果。");
+    warnings.push(t(
+      "Steam 英文候选扩展失败，已直接使用在线解析结果。",
+      "Expanding Steam English candidates failed. Using the online results directly.",
+    ));
   }
 
   const roots = deriveSteamSearchRoots(
@@ -962,7 +984,10 @@ export async function resolveManualSteamSearchPlan(
     warnings:
       queries.length > 0
         ? warnings
-        : ["在线搜索没有得到可验证的英文候选，请尝试英文游戏名。"],
+        : [t(
+          "在线搜索没有得到可验证的英文候选，请尝试英文游戏名。",
+          "Online search did not return a verifiable English candidate. Try the English game name.",
+        )],
   };
   if (plan.queries.length) {
     const verified = plan.queries.some(
@@ -1032,7 +1057,10 @@ function readAppDetailsInternal(
       typeof SteamClient === "undefined" ||
       typeof SteamClient.Apps?.RegisterForAppDetails !== "function"
     ) {
-      reject(new Error("当前 Steam 客户端不提供应用详情 API，无法安全读取启动项"));
+      reject(new Error(t(
+        "当前 Steam 客户端不提供应用详情 API，无法安全读取启动项",
+        "This Steam client does not provide the app details API, so launch options cannot be read safely.",
+      )));
       return;
     }
 
@@ -1168,7 +1196,10 @@ function readAppDetailsInternal(
           if (requireLaunchOptions) {
             finish(
               undefined,
-              new Error("读取目标启动项超时；为避免覆盖原设置，已停止操作"),
+              new Error(t(
+                "读取目标启动项超时；为避免覆盖原设置，已停止操作",
+                "Reading the target launch options timed out. The operation was stopped to avoid overwriting existing settings.",
+              )),
             );
           } else {
             finish(latestDetails);
@@ -1526,10 +1557,16 @@ export function shellDoubleQuote(value: string): string {
 function managedLaunchTokens(executable: string): [string, string] {
   const separator = executable.lastIndexOf("/");
   if (!executable.startsWith("/") || separator <= 0) {
-    throw new Error("修改器路径必须是 Linux 绝对路径");
+    throw new Error(t(
+      "修改器路径必须是 Linux 绝对路径",
+      "The trainer path must be an absolute Linux path",
+    ));
   }
   if (/[\r\n]/.test(executable) || /%command%/i.test(executable)) {
-    throw new Error("修改器路径包含 Steam 启动参数不支持的字符");
+    throw new Error(t(
+      "修改器路径包含 Steam 启动参数不支持的字符",
+      "The trainer path contains characters that Steam launch options do not support",
+    ));
   }
   return [
     `PROTON_REMOTE_DEBUG_CMD=${shellDoubleQuote(shlexQuote(executable))}`,
@@ -1581,7 +1618,10 @@ export function buildTrainerLaunchOptions(
       : null;
     if (!detected || !expected || detected !== expected) {
       throw new Error(
-        "检测到已有但无法安全交接的修改器启动项；仅支持路径与当前修改器一致的标准 CheatDeck 单程序配置",
+        t(
+          "检测到已有但无法安全交接的修改器启动项；仅支持路径与当前修改器一致的标准 CheatDeck 单程序配置",
+          "Existing trainer launch options cannot be handed over safely. Only a standard single-program CheatDeck configuration whose path matches the current trainer is supported.",
+        ),
       );
     }
     if (normalizedLinuxPath(executable) === detected) {
@@ -1681,7 +1721,10 @@ export function writeLaunchOptions(
   if (field === "shortcut") {
     if (typeof SteamClient.Apps.SetShortcutLaunchOptions !== "function") {
       throw new Error(
-        "当前 Steam 客户端不提供非 Steam 快捷方式启动项 API，已停止写入",
+        t(
+          "当前 Steam 客户端不提供非 Steam 快捷方式启动项 API，已停止写入",
+          "This Steam client does not provide the Non-Steam shortcut launch option API. Writing was stopped.",
+        ),
       );
     }
     SteamClient.Apps.SetShortcutLaunchOptions(appId, launchOptions);
@@ -1707,14 +1750,20 @@ export async function writeLaunchOptionsSafely(
 ): Promise<void> {
   const beforeWrite = await readAppDetails(observed.appId, timeoutMs);
   if (beforeWrite.targetType !== observed.targetType) {
-    throw new Error("Steam 目标类型在操作期间发生变化，已停止写入");
+    throw new Error(t(
+      "Steam 目标类型在操作期间发生变化，已停止写入",
+      "The Steam target type changed during the operation. Writing was stopped.",
+    ));
   }
   const beforeValue = observed.launchOptionsField === "shortcut"
     ? beforeWrite.shortcutLaunchOptions
     : beforeWrite.appLaunchOptions;
   if (beforeValue !== observed.launchOptions) {
     throw new Error(
-      "目标启动项在操作期间已被用户或其他插件修改，已停止写入以避免覆盖",
+      t(
+        "目标启动项在操作期间已被用户或其他插件修改，已停止写入以避免覆盖",
+        "The target launch options were changed by the user or another plugin during the operation. Writing was stopped to avoid overwriting them.",
+      ),
     );
   }
 
@@ -1728,7 +1777,10 @@ export async function writeLaunchOptionsSafely(
     await waitForSteam(delay);
     const confirmed = await readAppDetails(observed.appId, timeoutMs);
     if (confirmed.targetType !== observed.targetType) {
-      throw new Error("Steam 目标类型在写入期间发生变化，无法安全确认启动项");
+      throw new Error(t(
+        "Steam 目标类型在写入期间发生变化，无法安全确认启动项",
+        "The Steam target type changed while writing, so the launch options cannot be confirmed safely.",
+      ));
     }
     lastValue = observed.launchOptionsField === "shortcut"
       ? confirmed.shortcutLaunchOptions
@@ -1738,6 +1790,9 @@ export async function writeLaunchOptionsSafely(
     }
   }
   throw new Error(
-    `Steam 没有确认目标的新启动项，恢复记录已保留。当前值：${lastValue || "（空）"}`,
+    t(
+      `Steam 没有确认目标的新启动项，恢复记录已保留。当前值：${lastValue || "（空）"}`,
+      `Steam did not confirm the target's new launch options. The recovery record was preserved. Current value: ${lastValue || "(empty)"}`,
+    ),
   );
 }

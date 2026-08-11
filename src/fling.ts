@@ -1,5 +1,6 @@
 import { fetchNoCors } from "@decky/api";
 
+import { t } from "./i18n";
 import type {
   SearchResponse,
   SteamStoreCandidate,
@@ -92,7 +93,10 @@ export function parseFlingSearchItems(
   options: Pick<FlingSearchOptions, "mode" | "limit"> = {},
 ): TrainerEntry[] {
   if (!Array.isArray(payload)) {
-    throw new Error("FLiNG 搜索返回了无效数据");
+    throw new Error(t(
+      "FLiNG 搜索返回了无效数据",
+      "FLiNG search returned invalid data",
+    ));
   }
   const queryText = normalizedSearchText(query);
   const queryWords = queryText.split(" ").filter(Boolean);
@@ -168,7 +172,10 @@ export async function searchFlingTrainers(
 ): Promise<SearchResponse> {
   const term = query.replace(/\s+/g, " ").trim().slice(0, 120);
   if (term.length < 2) {
-    throw new Error("搜索词至少需要 2 个字符");
+    throw new Error(t(
+      "搜索词至少需要 2 个字符",
+      "The search term must contain at least 2 characters",
+    ));
   }
   const perPage = Math.max(1, Math.min(options.perPage ?? 20, 100));
   const parameters = new URLSearchParams({
@@ -197,7 +204,10 @@ export async function searchFlingTrainers(
       },
     );
     if (!response.ok) {
-      throw new Error(`FLiNG 搜索服务返回 HTTP ${response.status}`);
+      throw new Error(t(
+        `FLiNG 搜索服务返回 HTTP ${response.status}`,
+        `FLiNG search service returned HTTP ${response.status}`,
+      ));
     }
     const items = parseFlingSearchItems(term, await response.json(), {
       mode: options.mode,
@@ -208,10 +218,16 @@ export async function searchFlingTrainers(
       items,
       warnings: [
         ...(items.length === 0 && !/[A-Za-z]/.test(term)
-          ? ["FLiNG 官方索引使用英文游戏名；请使用 Steam 英文名搜索"]
+          ? [t(
+            "FLiNG 官方索引使用英文游戏名；请使用 Steam 英文名搜索",
+            "The official FLiNG index uses English game names. Search with the English Steam title.",
+          )]
           : []),
         ...(total > perPage
-          ? [`FLiNG 返回 ${total} 条原始记录，本次已检查前 ${perPage} 条。`]
+          ? [t(
+            `FLiNG 返回 ${total} 条原始记录，本次已检查前 ${perPage} 条。`,
+            `FLiNG returned ${total} raw records; the first ${perPage} were checked.`,
+          )]
           : []),
       ],
     };
@@ -221,7 +237,10 @@ export async function searchFlingTrainers(
     }
     if (timedOut) {
       throw new Error(
-        `FLiNG 搜索在 ${Math.ceil((options.timeoutMs ?? SEARCH_TIMEOUT_MS) / 1000)} 秒内没有响应，请检查网络后重试`,
+        t(
+          `FLiNG 搜索在 ${Math.ceil((options.timeoutMs ?? SEARCH_TIMEOUT_MS) / 1000)} 秒内没有响应，请检查网络后重试`,
+          `FLiNG search did not respond within ${Math.ceil((options.timeoutMs ?? SEARCH_TIMEOUT_MS) / 1000)} seconds. Check your connection and try again.`,
+        ),
       );
     }
     throw error;
@@ -304,7 +323,13 @@ export async function searchFlingTrainersMany(
   }
   const queries = [...unique.values()];
   if (!queries.length) {
-    return { items: [], warnings: ["没有可用于 FLiNG 的英文搜索候选。"] };
+    return {
+      items: [],
+      warnings: [t(
+        "没有可用于 FLiNG 的英文搜索候选。",
+        "No English search candidates are available for FLiNG.",
+      )],
+    };
   }
 
   const settled = await mapQueriesWithLimit(
@@ -322,7 +347,7 @@ export async function searchFlingTrainersMany(
     const rejected = settled.find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
-    throw rejected?.reason ?? new Error("搜索已取消");
+    throw rejected?.reason ?? new Error(t("搜索已取消", "Search cancelled"));
   }
 
   const merged = new Map<string, TrainerEntry>();
@@ -331,7 +356,10 @@ export async function searchFlingTrainersMany(
   for (const [index, result] of settled.entries()) {
     const query = queries[index];
     if (result.status === "rejected") {
-      warnings.push(`“${query.query}”搜索失败：${errorText(result.reason)}`);
+      warnings.push(t(
+        `“${query.query}”搜索失败：${errorText(result.reason)}`,
+        `Search for “${query.query}” failed: ${errorText(result.reason)}`,
+      ));
       continue;
     }
     completed += 1;
@@ -362,7 +390,10 @@ export async function searchFlingTrainersMany(
     }
   }
   if (completed === 0) {
-    throw new Error(warnings[0] ?? "FLiNG 搜索全部失败");
+    throw new Error(warnings[0] ?? t(
+      "FLiNG 搜索全部失败",
+      "All FLiNG searches failed",
+    ));
   }
   return {
     items: [...merged.values()],
