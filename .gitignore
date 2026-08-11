@@ -1,0 +1,51 @@
+# Dependencies and local toolchains
+node_modules/
+.pnpm-store/
+.tools/
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated frontend, bridge, and release artifacts
+dist/
+bin/
+out/
+release/
+
+# Local diagnostics and reverse-engineering samples
+.research/
+samples/
+scripts/inspect-cef.mjs
+scripts/read-cef-file.mjs
+*.log
+trainerdeck-bridge.json
+
+# Local AI-assistant instructions and working state
+.agents/
+.codex/
+.claude/
+.cursor/
+.windsurf/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.suo
+*.user
+.DS_Store
+Thumbs.db

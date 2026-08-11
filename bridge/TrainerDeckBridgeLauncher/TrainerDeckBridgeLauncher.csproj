@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>TrainerDeckBridgeLauncher</AssemblyName>
+    <RootNamespace>TrainerDeckBridgeLauncher</RootNamespace>
+    <OutputType>WinExe</OutputType>
+    <Platforms>AnyCPU</Platforms>
+    <TargetFramework>net462</TargetFramework>
+    <Version>0.6.7</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\BridgeManifest.cs" Link="Protocol\BridgeManifest.cs" />
+    <Compile Include="..\Shared\FrameworkCompat.cs" Link="Compatibility\FrameworkCompat.cs" />
+    <Compile Include="..\Shared\JsonCodec.cs" Link="Protocol\JsonCodec.cs" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net462"
+                      Version="1.0.3"
+                      PrivateAssets="all" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+  </ItemGroup>
+</Project>

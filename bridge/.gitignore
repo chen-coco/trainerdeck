@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+artifacts/
+.packages/
+trainerdeck-bridge.json
+trainerdeck-bridge.log

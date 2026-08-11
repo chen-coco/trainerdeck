@@ -1,0 +1,14 @@
+{
+  "name": "TrainerDeck",
+  "author": "TrainerDeck contributors",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "games",
+      "utilities",
+      "trainer"
+    ],
+    "description": "Find, install, bind, and directly control supported FLiNG trainers from Game Mode."
+  }
+}
