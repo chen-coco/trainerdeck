@@ -159,6 +159,9 @@ const steamStoreItems = (term) => {
 };
 
 const localRequire = (id) => {
+  if (id === "./i18n") {
+    return { t: (chinese) => chinese };
+  }
   if (id === "@decky/api") {
     return {
       fetchNoCors: async (url, init = {}) => {
@@ -249,6 +252,9 @@ const recoveryCompiled = ts.transpileModule(recoverySource, {
 const recoveryLoaded = { exports: {} };
 new Function("require", "module", "exports", recoveryCompiled)(
   (id) => {
+    if (id === "./i18n") {
+      return { t: (chinese) => chinese };
+    }
     if (id === "@decky/api") {
       return { toaster: { toast() {} } };
     }

@@ -75,6 +75,9 @@ const payloads = {
 };
 const loaded = { exports: {} };
 const localRequire = (id) => {
+  if (id === "./i18n") {
+    return { t: (chinese) => chinese };
+  }
   if (id === "@decky/api") {
     return {
       fetchNoCors: async (url) => {

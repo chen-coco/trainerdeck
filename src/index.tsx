@@ -40,6 +40,7 @@ import {
   setTrainerOptionValue,
 } from "./backend";
 import { searchFlingTrainersMany } from "./fling";
+import { localizedTrainerText, t } from "./i18n";
 import { qamInputRecoveryController } from "./input-recovery";
 import {
   cancelInputRecoverySession,
@@ -71,7 +72,6 @@ import {
 import type {
   InstalledTrainer,
   BackendStatus,
-  LocalizedTrainerText,
   SteamTarget,
   TrainerDeckSettings,
   TrainerEntry,
@@ -118,18 +118,20 @@ function launchOptionsBeforeBinding(
     ? binding.target_type
     : null;
   if (recordedTargetType && recordedTargetType !== details.targetType) {
-    throw new Error(
+    throw new Error(t(
       "当前 AppID 的目标类型与已有绑定不一致；请先恢复并解除旧绑定",
-    );
+      "The current AppID type does not match its existing binding. Restore and remove the old binding first.",
+    ));
   }
   if (
     recordedTargetType === "shortcut" &&
     binding.shortcut_exe?.trim() &&
     binding.shortcut_exe.trim() !== details.shortcutExe?.trim()
   ) {
-    throw new Error(
+    throw new Error(t(
       "非 Steam 快捷方式的可执行文件已变化；请先恢复并解除旧绑定",
-    );
+      "The Non-Steam shortcut executable has changed. Restore and remove the old binding first.",
+    ));
   }
   const managedExecutables = [
     binding.managed_launch_executable || "",
@@ -152,15 +154,17 @@ function launchOptionsBeforeBinding(
       ? details.appLaunchOptions
       : details.shortcutLaunchOptions;
     if (recordedOptions === undefined) {
-      throw new Error(
+      throw new Error(t(
         "Steam 没有返回旧绑定使用的启动项字段；为避免覆盖原设置，请先使用“一键恢复启动项”处理旧绑定",
-      );
+        "Steam did not return the launch option field used by the old binding. Use launch option recovery first to avoid overwriting existing settings.",
+      ));
     }
     const recovered = recover(recordedOptions);
     if (recordedField !== details.launchOptionsField && recovered.changed) {
-      throw new Error(
+      throw new Error(t(
         "检测到旧绑定使用另一种启动项字段；请先使用“一键恢复启动项”清理旧绑定，再重新添加修改器",
-      );
+        "The old binding uses a different launch option field. Recover the old binding before adding the trainer again.",
+      ));
     }
     return recordedField === details.launchOptionsField
       ? recovered.launchOptions
@@ -175,15 +179,17 @@ function launchOptionsBeforeBinding(
     const appOwned = appRecovery.changed;
     const shortcutOwned = Boolean(shortcutRecovery?.changed);
     if (appOwned && shortcutOwned) {
-      throw new Error(
+      throw new Error(t(
         "普通启动项和快捷方式启动项中都检测到旧绑定；请先使用“一键恢复启动项”逐项确认并清理",
-      );
+        "An old binding was found in both regular and shortcut launch options. Use launch option recovery to review and clean each one first.",
+      ));
     }
     const ownedField = appOwned ? "app" : shortcutOwned ? "shortcut" : null;
     if (ownedField && ownedField !== details.launchOptionsField) {
-      throw new Error(
+      throw new Error(t(
         "检测到旧版绑定使用另一种启动项字段；请先使用“一键恢复启动项”清理旧绑定，再重新添加修改器",
-      );
+        "A legacy binding uses a different launch option field. Recover the old binding before adding the trainer again.",
+      ));
     }
     if (details.launchOptionsField === "app") {
       return appRecovery.launchOptions;
@@ -192,17 +198,6 @@ function launchOptionsBeforeBinding(
   }
 
   return recover(details.appLaunchOptions).launchOptions;
-}
-
-function localizedText(value: LocalizedTrainerText): string {
-  const language = navigator.language.toLowerCase();
-  if (language.startsWith("zh-tw") || language.startsWith("zh-hk")) {
-    return value.zh_tw || value.zh_cn || value.en || "";
-  }
-  if (language.startsWith("zh")) {
-    return value.zh_cn || value.zh_tw || value.en || "";
-  }
-  return value.en || value.zh_cn || value.zh_tw || "";
 }
 
 const REQUIRED_RUNTIME_CAPABILITIES = [
@@ -241,8 +236,8 @@ function RuntimeOptionRow({
   const [tooltipPinned, setTooltipPinned] = useState(false);
   const [validationError, setValidationError] = useState("");
   const tooltipRef = useRef<HTMLDivElement | null>(null);
-  const label = localizedText(option.labels) || option.id;
-  const tooltip = localizedText(option.tooltips);
+  const label = localizedTrainerText(option.labels) || option.id;
+  const tooltip = localizedTrainerText(option.tooltips);
   const hasToggle = option.controllable && option.active !== null;
   const hasValue = option.value_controllable;
   const hasAction = option.action_controllable && !hasToggle && !hasValue;
@@ -286,26 +281,32 @@ function RuntimeOptionRow({
   const validateValue = (): string => {
     const value = draft.trim();
     if (!value) {
-      return "请输入数值";
+      return t("请输入数值", "Enter a value");
     }
     if (value.length > 200) {
-      return "输入内容过长";
+      return t("输入内容过长", "The value is too long");
     }
     if (!valueIsNumeric) {
       return "";
     }
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
-      return "请输入有效数字";
+      return t("请输入有效数字", "Enter a valid number");
     }
     if (option.value_type === "integer" && !Number.isInteger(numeric)) {
-      return "该项目只接受整数";
+      return t("该项目只接受整数", "This option only accepts whole numbers");
     }
     if (option.minimum !== undefined && numeric < option.minimum) {
-      return `不能小于 ${option.minimum}`;
+      return t(
+        `不能小于 ${option.minimum}`,
+        `Cannot be less than ${option.minimum}`,
+      );
     }
     if (option.maximum !== undefined && numeric > option.maximum) {
-      return `不能大于 ${option.maximum}`;
+      return t(
+        `不能大于 ${option.maximum}`,
+        `Cannot be greater than ${option.maximum}`,
+      );
     }
     return "";
   };
@@ -323,7 +324,7 @@ function RuntimeOptionRow({
       <span>{label}</span>
       {tooltip && (
         <FaExclamationCircle
-          aria-label="此修改项有说明"
+          aria-label={t("此修改项有说明", "This trainer option has a description")}
           color={tooltipColor}
           title={tooltip}
         />
@@ -331,9 +332,13 @@ function RuntimeOptionRow({
     </span>
   );
   const rangeDescription = [
-    option.minimum !== undefined ? `最小 ${option.minimum}` : "",
-    option.maximum !== undefined ? `最大 ${option.maximum}` : "",
-    option.step !== undefined ? `步长 ${option.step}` : "",
+    option.minimum !== undefined
+      ? t(`最小 ${option.minimum}`, `Minimum ${option.minimum}`)
+      : "",
+    option.maximum !== undefined
+      ? t(`最大 ${option.maximum}`, `Maximum ${option.maximum}`)
+      : "",
+    option.step !== undefined ? t(`步长 ${option.step}`, `Step ${option.step}`) : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -343,19 +348,34 @@ function RuntimeOptionRow({
     option.value_error ||
     option.error ||
     (option.action_pending
-      ? "正在执行修改器动作…"
+      ? t("正在执行修改器动作…", "Running trainer action…")
       : option.value_pending
-      ? `正在写入数值 ${option.desired_value ?? draft}…`
+      ? t(
+        `正在写入数值 ${option.desired_value ?? draft}…`,
+        `Writing value ${option.desired_value ?? draft}…`,
+      )
       : option.pending
-      ? `等待修改器核心确认${option.desired ? "开启" : "关闭"}…`
+      ? t(
+        `等待修改器核心确认${option.desired ? "开启" : "关闭"}…`,
+        `Waiting for the trainer core to confirm ${option.desired ? "enabled" : "disabled"}…`,
+      )
       : !connected
-        ? "bridge 连接已断开，状态暂不可用"
+        ? t(
+          "bridge 连接已断开，状态暂不可用",
+          "The bridge is disconnected; status is temporarily unavailable",
+        )
       : !gameAvailable
-        ? "游戏尚未被修改器检测到"
+        ? t(
+          "游戏尚未被修改器检测到",
+          "The trainer has not detected the game yet",
+        )
         : option.value !== undefined && !hasValue
-          ? `当前值：${option.value}（当前 bridge 只读）`
+          ? t(
+            `当前值：${option.value}（当前 bridge 只读）`,
+            `Current value: ${option.value} (read-only with this bridge)`,
+          )
         : option.active === null && !hasValue
-          ? "当前状态不可用"
+          ? t("当前状态不可用", "Current status unavailable")
           : "");
 
   return (
@@ -374,8 +394,12 @@ function RuntimeOptionRow({
           ? () => setTooltipPinned((current) => !current)
           : undefined
       }
-      onOKActionDescription={rowDisabled && tooltip ? "查看说明" : undefined}
-      aria-label={rowDisabled && tooltip ? `${label}：查看说明` : undefined}
+      onOKActionDescription={rowDisabled && tooltip
+        ? t("查看说明", "View description")
+        : undefined}
+      aria-label={rowDisabled && tooltip
+        ? t(`${label}：查看说明`, `${label}: View description`)
+        : undefined}
       role={rowDisabled && tooltip ? "button" : undefined}
       tabIndex={rowDisabled && tooltip ? 0 : undefined}
       onMouseEnter={() => setHovered(true)}
@@ -409,7 +433,7 @@ function RuntimeOptionRow({
             }}
           >
             <TextField
-              label={hasToggle ? "数值" : undefined}
+              label={hasToggle ? t("数值", "Value") : undefined}
               description={rangeDescription || undefined}
               value={draft}
               mustBeNumeric={valueIsNumeric}
@@ -437,14 +461,22 @@ function RuntimeOptionRow({
               onClick={submitValue}
               style={{ minWidth: "68px" }}
             >
-              {option.value_apply_mode === "invoke" ? "执行" : "应用"}
+              {option.value_apply_mode === "invoke"
+                ? t("执行", "Run")
+                : t("应用", "Apply")}
             </DialogButton>
           </div>
           {!description && option.value_apply_mode === "stage_then_toggle" && (
             <SmallNote>
               {option.active === true
-                ? "应用时会自动关闭并重新开启此功能，使新数值由修改器核心重新载入。"
-                : "应用时会写入新数值并同时开启此功能。"}
+                ? t(
+                  "应用时会自动关闭并重新开启此功能，使新数值由修改器核心重新载入。",
+                  "Applying will turn this option off and on again so the trainer core reloads the new value.",
+                )
+                : t(
+                  "应用时会写入新数值并同时开启此功能。",
+                  "Applying will write the new value and enable this option.",
+                )}
             </SmallNote>
           )}
           {description && <SmallNote>{description}</SmallNote>}
@@ -463,7 +495,10 @@ function RuntimeOptionRow({
           <div>
             <div style={{ fontSize: "14px", fontWeight: 600 }}>{labelNode}</div>
             <SmallNote>
-              {description || "这是一次性动作；按下“应用”后会直接调用修改器原功能。"}
+              {description || t(
+                "这是一次性动作；按下“应用”后会直接调用修改器原功能。",
+                "This is a one-time action. Select Apply to invoke the trainer's original function.",
+              )}
             </SmallNote>
           </div>
           <DialogButton
@@ -471,7 +506,9 @@ function RuntimeOptionRow({
             onClick={onAction}
             style={{ minWidth: "76px" }}
           >
-            {option.action_pending ? "应用中…" : "应用"}
+            {option.action_pending
+              ? t("应用中…", "Applying…")
+              : t("应用", "Apply")}
           </DialogButton>
         </div>
       )}
@@ -483,8 +520,14 @@ function RuntimeOptionRow({
           description={
             description ||
             (option.kind === "action"
-              ? "该数值/动作项目尚未开放直接写入"
-              : "该项目不支持直接同步")
+              ? t(
+                "该数值/动作项目尚未开放直接写入",
+                "Direct input is not available for this value or action yet",
+              )
+              : t(
+                "该项目不支持直接同步",
+                "This option does not support direct synchronization",
+              ))
           }
           tooltip={tooltip || undefined}
         >
@@ -659,7 +702,10 @@ function Content() {
       const status = await withTimeout(
         getBackendStatus(),
         2500,
-        "TrainerDeck Python 后端未连接",
+        t(
+          "TrainerDeck Python 后端未连接",
+          "TrainerDeck Python backend is not connected",
+        ),
       );
       if (backendRequest.current !== request) {
         return;
@@ -667,11 +713,17 @@ function Content() {
       setBackendStatus(status);
       if (!status.core_ready) {
         setBackendMessage(
-          status.core_error || "后端存储尚未初始化，下载和设置保存暂不可用",
+          status.core_error || t(
+            "后端存储尚未初始化，下载和设置保存暂不可用",
+            "Backend storage is not initialized; downloads and settings cannot be saved.",
+          ),
         );
       } else if (!status.runtime_ready) {
         setBackendMessage(
-          status.runtime_error || "修改器面板同步组件尚未启动",
+          status.runtime_error || t(
+            "修改器面板同步组件尚未启动",
+            "The trainer panel synchronization component has not started.",
+          ),
         );
       }
     } catch (error) {
@@ -704,7 +756,7 @@ function Content() {
     }
     const term = value.trim();
     if (term.length < 2) {
-      notify("TrainerDeck", "请输入至少 2 个字符");
+      notify("TrainerDeck", t("请输入至少 2 个字符", "Enter at least 2 characters"));
       return [];
     }
     searchAbort.current?.abort();
@@ -720,7 +772,9 @@ function Content() {
     }, 22000);
     setBusy("search");
     setSearchStage(
-      mode === "automatic" ? "正在搜索当前游戏…" : "正在在线解析游戏名…",
+      mode === "automatic"
+        ? t("正在搜索当前游戏…", "Searching for the current game…")
+        : t("正在在线解析游戏名…", "Resolving the game name online…"),
     );
     try {
       const currentTarget = targetRef.current;
@@ -761,13 +815,16 @@ function Content() {
         ? [...plan.queries, ...plan.fallbackQueries]
         : plan.queries;
       if (!searchQueries.length) {
-        const message = plan.warnings[0] ?? "没有解析出可搜索的英文游戏名";
+        const message = plan.warnings[0] ?? t(
+          "没有解析出可搜索的英文游戏名",
+          "No searchable English game name could be resolved.",
+        );
         setResults([]);
         setWarnings([message]);
-        notify("没有找到结果", message);
+        notify(t("没有找到结果", "No results found"), message);
         return [];
       }
-      setSearchStage("正在搜索 FLiNG…");
+      setSearchStage(t("正在搜索 FLiNG…", "Searching FLiNG…"));
       const response = await searchFlingTrainersMany(searchQueries, {
         mode: mode === "automatic" ? "exact" : "series",
         signal: controller.signal,
@@ -793,11 +850,17 @@ function Content() {
       const resolutionNote =
         mode === "manual" &&
           (/[\u3400-\u9fff\uf900-\ufaff]/u.test(term) || resolvedNames.length > 1)
-          ? `在线搜索将“${term}”解析为：${resolvedNames.join("、")}`
+          ? t(
+            `在线搜索将“${term}”解析为：${resolvedNames.join("、")}`,
+            `Online search resolved “${term}” as: ${resolvedNames.join(", ")}`,
+          )
           : "";
       const resultCountNote =
         mode === "manual" && visibleItems.length > 0
-          ? `部分名称搜索共找到 ${visibleItems.length} 个匹配结果。`
+          ? t(
+            `部分名称搜索共找到 ${visibleItems.length} 个匹配结果。`,
+            `Partial-name search found ${visibleItems.length} matching results.`,
+          )
           : "";
       setWarnings([
         ...(resolutionNote ? [resolutionNote] : []),
@@ -807,19 +870,25 @@ function Content() {
       ]);
       if (!visibleItems.length) {
         notify(
-          "没有找到结果",
+          t("没有找到结果", "No results found"),
           plan.warnings[0] || response.warnings[0] || resolutionNote ||
-            "请尝试更完整的中文名或英文名",
+            t(
+              "请尝试更完整的中文名或英文名",
+              "Try a more complete Chinese or English game name.",
+            ),
         );
       }
       return mode === "automatic" ? sortedItems : visibleItems;
     } catch (error) {
       if (controller.signal.aborted) {
         if (timedOut && searchRequest.current === request) {
-          const message = "在线解析与 FLiNG 搜索在 22 秒内没有完成，请检查网络后重试";
+          const message = t(
+            "在线解析与 FLiNG 搜索在 22 秒内没有完成，请检查网络后重试",
+            "Online name resolution and FLiNG search did not finish within 22 seconds. Check your connection and try again.",
+          );
           setResults([]);
           setWarnings([message]);
-          notify("搜索超时", message);
+          notify(t("搜索超时", "Search timed out"), message);
         }
         return [];
       }
@@ -827,7 +896,7 @@ function Content() {
         const message = errorText(error);
         setResults([]);
         setWarnings([message]);
-        notify("搜索失败", message);
+        notify(t("搜索失败", "Search failed"), message);
       }
       return [];
     } finally {
@@ -850,7 +919,7 @@ function Content() {
     searchRequest.current += 1;
     setBusy((current) => (current === "search" ? null : current));
     setSearchStage("");
-    notify("TrainerDeck", "已取消本次搜索");
+    notify("TrainerDeck", t("已取消本次搜索", "Search cancelled"));
   }, []);
 
   useEffect(() => {
@@ -859,7 +928,7 @@ function Content() {
     void withTimeout(
       getSettings(),
       8000,
-      "设置后端暂未响应",
+      t("设置后端暂未响应", "The settings backend is not responding yet"),
     )
       .then((value) => {
         if (alive) {
@@ -871,7 +940,7 @@ function Content() {
         if (alive) {
           const message = errorText(error);
           setSettingsStatus("error");
-          notify("读取设置失败", message);
+          notify(t("读取设置失败", "Could not read settings"), message);
         }
       });
     const handleSettingsChanged = (event: Event) => {
@@ -1012,7 +1081,10 @@ function Content() {
         setNeedsRestart(false);
       })
       .catch((error: unknown) =>
-        notify("读取 Steam 游戏信息失败", errorText(error)),
+        notify(
+          t("读取 Steam 游戏信息失败", "Could not read Steam game information"),
+          errorText(error),
+        ),
       );
     return () => {
       alive = false;
@@ -1038,7 +1110,7 @@ function Content() {
       void withTimeout(
         getBinding(appId),
         3500,
-        "读取修改器绑定超时",
+        t("读取修改器绑定超时", "Reading the trainer binding timed out"),
       )
         .then((savedBinding) => {
           if (
@@ -1061,7 +1133,10 @@ function Content() {
           }
           setBindingReady(false);
           if (bindingRetryAttempt === 0) {
-            notify("读取修改器绑定失败", errorText(error));
+            notify(
+              t("读取修改器绑定失败", "Could not read the trainer binding"),
+              errorText(error),
+            );
           } else {
             console.warn("TrainerDeck binding retry failed", error);
           }
@@ -1154,7 +1229,10 @@ function Content() {
       void getTrainerRuntime(appId)
         .then(receiveSnapshot)
         .catch((error: unknown) =>
-          notify("读取修改器面板失败", errorText(error)),
+          notify(
+            t("读取修改器面板失败", "Could not read the trainer panel"),
+            errorText(error),
+          ),
         );
     };
     refresh();
@@ -1193,7 +1271,13 @@ function Content() {
       operationTarget.appId !== selectedAppIdRef.current
     ) {
       if (!automatic) {
-        notify("无法绑定", "请先启动要绑定的 Steam 游戏或非 Steam 快捷方式");
+        notify(
+          t("无法绑定", "Cannot bind trainer"),
+          t(
+            "请先启动要绑定的 Steam 游戏或非 Steam 快捷方式",
+            "Start the Steam game or Non-Steam shortcut you want to bind first.",
+          ),
+        );
       }
       return false;
     }
@@ -1203,15 +1287,24 @@ function Content() {
     ) {
       if (!automatic) {
         notify(
-          "无法绑定",
-          "这个搜索结果没有与当前目标精确匹配；请从当前非 Steam 快捷方式或手动搜索结果中明确选择后再绑定。",
+          t("无法绑定", "Cannot bind trainer"),
+          t(
+            "这个搜索结果没有与当前目标精确匹配；请从当前非 Steam 快捷方式或手动搜索结果中明确选择后再绑定。",
+            "This search result is not an exact match for the current target. Explicitly select it from the current Non-Steam shortcut or manual search results before binding.",
+          ),
         );
       }
       return false;
     }
     if (installInFlight.current !== null || sharedInstallLock() !== null) {
       if (!automatic) {
-        notify("操作正在进行", "已有修改器正在下载或绑定，请稍候");
+        notify(
+          t("操作正在进行", "Operation in progress"),
+          t(
+            "已有修改器正在下载或绑定，请稍候",
+            "Another trainer is being downloaded or bound. Please wait.",
+          ),
+        );
       }
       return false;
     }
@@ -1224,7 +1317,13 @@ function Content() {
     const operationToken = `${operationAppId}:${entry.id}:${Date.now()}`;
     if (!acquireSharedInstallLock(operationToken)) {
       if (!automatic) {
-        notify("操作正在进行", "已有修改器正在下载或绑定，请稍候");
+        notify(
+          t("操作正在进行", "Operation in progress"),
+          t(
+            "已有修改器正在下载或绑定，请稍候",
+            "Another trainer is being downloaded or bound. Please wait.",
+          ),
+        );
       }
       return false;
     }
@@ -1256,7 +1355,10 @@ function Content() {
       const persisted = await withTimeout(
         getSettings(),
         3000,
-        "读取自动添加设置超时",
+        t(
+          "读取自动添加设置超时",
+          "Reading automatic setup settings timed out",
+        ),
       );
       return shouldContinue() && persisted.auto_search_and_add === true;
     };
@@ -1270,19 +1372,28 @@ function Content() {
         const preflight = await readAppDetails(operationAppId);
         if (!shouldContinue() || !sameTargetIdentity(preflight)) {
           return automaticStopped(
-            "自动添加期间当前游戏发生变化，已停止下载和绑定。",
+            t(
+              "自动添加期间当前游戏发生变化，已停止下载和绑定。",
+              "The current game changed during automatic setup, so downloading and binding were stopped.",
+            ),
           );
         }
         automaticLaunchOptionsField = preflight.launchOptionsField;
         if (hasCheatDeckLaunchConfiguration(preflight)) {
           return automaticStopped(
-            "检测到当前游戏已有 CheatDeck/修改器启动设置，已跳过自动搜索和添加；仍可手动搜索。",
+            t(
+              "检测到当前游戏已有 CheatDeck/修改器启动设置，已跳过自动搜索和添加；仍可手动搜索。",
+              "Existing CheatDeck or trainer launch options were detected for the current game. Automatic search and setup were skipped; manual search is still available.",
+            ),
           );
         }
         const existingBinding = await withTimeout(
           getBinding(operationAppId),
           3500,
-          "复查修改器绑定超时",
+          t(
+            "复查修改器绑定超时",
+            "Rechecking the trainer binding timed out",
+          ),
         );
         if (!shouldContinue()) {
           return false;
@@ -1294,7 +1405,10 @@ function Content() {
             setBindingReady(true);
           }
           return automaticStopped(
-            "当前游戏已经绑定修改器，已跳过自动添加。",
+            t(
+              "当前游戏已经绑定修改器，已跳过自动添加。",
+              "The current game already has a trainer binding. Automatic setup was skipped.",
+            ),
           );
         }
       }
@@ -1306,28 +1420,43 @@ function Content() {
       const installed = await downloadTrainer(entry);
       if (automatic && !await automaticStillEnabled()) {
         return automaticStopped(
-          "自动下载已完成，但当前游戏或设置已经变化，因此没有写入绑定和启动项。",
+          t(
+            "自动下载已完成，但当前游戏或设置已经变化，因此没有写入绑定和启动项。",
+            "The automatic download completed, but the current game or settings changed, so no binding or launch options were written.",
+          ),
         );
       }
       const bridge = await prepareTrainerBridge(operationAppId, installed.id);
       if (automatic && !shouldContinue()) {
         return automaticStopped(
-          "修改器已下载，但当前游戏或设置已经变化，因此没有写入绑定和启动项。",
+          t(
+            "修改器已下载，但当前游戏或设置已经变化，因此没有写入绑定和启动项。",
+            "The trainer was downloaded, but the current game or settings changed, so no binding or launch options were written.",
+          ),
         );
       }
       const latestDetails = await readAppDetails(operationAppId);
       if (!sameTargetIdentity(latestDetails)) {
         throw new Error(
           operationTargetType === "shortcut"
-            ? "非 Steam 快捷方式在下载期间已被替换；修改器已下载，但没有写入启动项"
-            : "Steam 目标类型在下载期间发生变化；修改器已下载，但没有写入启动项",
+            ? t(
+              "非 Steam 快捷方式在下载期间已被替换；修改器已下载，但没有写入启动项",
+              "The Non-Steam shortcut was replaced during the download. The trainer was downloaded, but launch options were not changed.",
+            )
+            : t(
+              "Steam 目标类型在下载期间发生变化；修改器已下载，但没有写入启动项",
+              "The Steam target type changed during the download. The trainer was downloaded, but launch options were not changed.",
+            ),
         );
       }
       const latestShortcutExe = latestDetails.shortcutExe?.trim() ?? "";
       if (automatic) {
         if (!await automaticStillEnabled()) {
           return automaticStopped(
-            "修改器已下载，但自动添加设置已经关闭，因此没有写入绑定和启动项。",
+            t(
+              "修改器已下载，但自动添加设置已经关闭，因此没有写入绑定和启动项。",
+              "The trainer was downloaded, but automatic setup was turned off, so no binding or launch options were written.",
+            ),
           );
         }
         if (
@@ -1335,18 +1464,27 @@ function Content() {
           latestDetails.launchOptionsField !== automaticLaunchOptionsField
         ) {
           return automaticStopped(
-            "修改器已下载，但当前游戏或启动项字段已经变化，因此没有写入绑定。",
+            t(
+              "修改器已下载，但当前游戏或启动项字段已经变化，因此没有写入绑定。",
+              "The trainer was downloaded, but the current game or launch option field changed, so no binding was written.",
+            ),
           );
         }
         if (hasCheatDeckLaunchConfiguration(latestDetails)) {
           return automaticStopped(
-            "下载期间检测到当前游戏已加入 CheatDeck/修改器启动设置，因此没有覆盖现有配置。",
+            t(
+              "下载期间检测到当前游戏已加入 CheatDeck/修改器启动设置，因此没有覆盖现有配置。",
+              "CheatDeck or trainer launch options were added to the current game during the download, so the existing configuration was not overwritten.",
+            ),
           );
         }
         const existingBinding = await withTimeout(
           getBinding(operationAppId),
           3500,
-          "写入前复查修改器绑定超时",
+          t(
+            "写入前复查修改器绑定超时",
+            "Rechecking the trainer binding before writing timed out",
+          ),
         );
         if (!shouldContinue()) {
           return false;
@@ -1358,7 +1496,10 @@ function Content() {
             setBindingReady(true);
           }
           return automaticStopped(
-            "下载期间当前游戏已经绑定修改器，因此没有重复写入启动项。",
+            t(
+              "下载期间当前游戏已经绑定修改器，因此没有重复写入启动项。",
+              "The current game was bound to a trainer during the download, so launch options were not written again.",
+            ),
           );
         }
       }
@@ -1397,16 +1538,32 @@ function Content() {
         setNeedsRestart(operationRunning);
       }
       notify(
-        automatic ? "已自动下载并添加" : "已下载并绑定",
+        automatic
+          ? t("已自动下载并添加", "Automatically downloaded and added")
+          : t("已下载并绑定", "Downloaded and bound"),
         bridge.supported
           ? operationRunning
-            ? "同步组件与启动参数已写入；请退出并重新启动游戏"
-            : "同步组件已准备，将随游戏在同一 Proton 前缀启动"
-          : `修改器已绑定，但同步组件不可用：${bridge.reason}`,
+            ? t(
+              "同步组件与启动参数已写入；请退出并重新启动游戏",
+              "The synchronization component and launch parameters were written. Exit and restart the game.",
+            )
+            : t(
+              "同步组件已准备，将随游戏在同一 Proton 前缀启动",
+              "The synchronization component is ready and will start with the game in the same Proton prefix.",
+            )
+          : t(
+            `修改器已绑定，但同步组件不可用：${bridge.reason}`,
+            `The trainer was bound, but synchronization is unavailable: ${bridge.reason}`,
+          ),
       );
       return true;
     } catch (error) {
-      notify(automatic ? "自动添加失败" : "安装失败", errorText(error));
+      notify(
+        automatic
+          ? t("自动添加失败", "Automatic setup failed")
+          : t("安装失败", "Installation failed"),
+        errorText(error),
+      );
       return false;
     } finally {
       if (installInFlight.current === operationToken) {
@@ -1450,7 +1607,10 @@ function Content() {
       if (lastAutomaticAdd.current !== operationKey) {
         lastAutomaticAdd.current = operationKey;
         appendWarning(
-          "检测到当前游戏已有 CheatDeck/修改器启动设置，已跳过自动搜索和添加；仍可手动搜索。",
+          t(
+            "检测到当前游戏已有 CheatDeck/修改器启动设置，已跳过自动搜索和添加；仍可手动搜索。",
+            "Existing CheatDeck or trainer launch options were detected for the current game. Automatic search and setup were skipped; manual search is still available.",
+          ),
         );
       }
       return;
@@ -1506,13 +1666,19 @@ function Content() {
           (preflight.shortcutExe?.trim() ?? "") !== shortcutIdentity
         ) {
           appendWarning(
-            "当前游戏信息在自动添加前发生变化，已停止本次操作。",
+            t(
+              "当前游戏信息在自动添加前发生变化，已停止本次操作。",
+              "The current game information changed before automatic setup, so the operation was stopped.",
+            ),
           );
           return;
         }
         if (hasCheatDeckLaunchConfiguration(preflight)) {
           appendWarning(
-            "检测到当前游戏已有 CheatDeck/修改器启动设置，已跳过自动搜索和添加；仍可手动搜索。",
+            t(
+              "检测到当前游戏已有 CheatDeck/修改器启动设置，已跳过自动搜索和添加；仍可手动搜索。",
+              "Existing CheatDeck or trainer launch options were detected for the current game. Automatic search and setup were skipped; manual search is still available.",
+            ),
           );
           return;
         }
@@ -1520,7 +1686,10 @@ function Content() {
         const existingBinding = await withTimeout(
           getBinding(operationAppId),
           3500,
-          "自动搜索前读取修改器绑定超时",
+          t(
+            "自动搜索前读取修改器绑定超时",
+            "Reading the trainer binding before automatic search timed out",
+          ),
         );
         if (!shouldContinue()) {
           return;
@@ -1531,7 +1700,10 @@ function Content() {
             setBinding(existingBinding);
             setBindingReady(true);
           }
-          appendWarning("当前游戏已经绑定修改器，已跳过自动搜索和添加。");
+          appendWarning(t(
+            "当前游戏已经绑定修改器，已跳过自动搜索和添加。",
+            "The current game already has a trainer binding. Automatic search and setup were skipped.",
+          ));
           return;
         }
 
@@ -1541,7 +1713,10 @@ function Content() {
         }
         if (operationTargetType !== "steam") {
           appendWarning(
-            "非 Steam 快捷方式无法用商店 AppID 自动核验；已显示搜索结果，请手动确认后下载并绑定。",
+            t(
+              "非 Steam 快捷方式无法用商店 AppID 自动核验；已显示搜索结果，请手动确认后下载并绑定。",
+              "A Non-Steam shortcut cannot be verified automatically using a store AppID. Review the displayed results before downloading and binding.",
+            ),
           );
           return;
         }
@@ -1559,8 +1734,14 @@ function Content() {
         if (exactEntries.size !== 1) {
           appendWarning(
             exactEntries.size === 0
-              ? "没有找到能用当前 Steam AppID 唯一核验的修改器，已停止自动下载；请手动搜索确认。"
-              : "找到多个能匹配当前 Steam AppID 的修改器，已停止自动下载；请手动选择。",
+              ? t(
+                "没有找到能用当前 Steam AppID 唯一核验的修改器，已停止自动下载；请手动搜索确认。",
+                "No trainer could be uniquely verified against the current Steam AppID. Automatic download was stopped; use manual search to confirm.",
+              )
+              : t(
+                "找到多个能匹配当前 Steam AppID 的修改器，已停止自动下载；请手动选择。",
+                "Multiple trainers match the current Steam AppID. Automatic download was stopped; choose one manually.",
+              ),
           );
           return;
         }
@@ -1574,7 +1755,10 @@ function Content() {
         }
       } catch (error) {
         if (shouldContinue()) {
-          notify("自动搜索和添加失败", errorText(error));
+          notify(
+            t("自动搜索和添加失败", "Automatic search and setup failed"),
+            errorText(error),
+          );
         }
       } finally {
         if (automaticAddInFlight.current === automaticToken) {
@@ -1599,21 +1783,36 @@ function Content() {
 
   const downloadOnly = async (entry: TrainerEntry) => {
     if (installInFlight.current !== null || sharedInstallLock() !== null) {
-      notify("操作正在进行", "已有修改器正在下载或绑定，请稍候");
+      notify(
+        t("操作正在进行", "Operation in progress"),
+        t(
+          "已有修改器正在下载或绑定，请稍候",
+          "Another trainer is being downloaded or bound. Please wait.",
+        ),
+      );
       return;
     }
     const operationToken = `download:${entry.id}:${Date.now()}`;
     if (!acquireSharedInstallLock(operationToken)) {
-      notify("操作正在进行", "已有修改器正在下载或绑定，请稍候");
+      notify(
+        t("操作正在进行", "Operation in progress"),
+        t(
+          "已有修改器正在下载或绑定，请稍候",
+          "Another trainer is being downloaded or bound. Please wait.",
+        ),
+      );
       return;
     }
     installInFlight.current = operationToken;
     setBusy(`download:${entry.id}`);
     try {
       const installed = await downloadTrainer(entry);
-      notify("修改器已下载", installed.folder || installed.executable);
+      notify(
+        t("修改器已下载", "Trainer downloaded"),
+        installed.folder || installed.executable,
+      );
     } catch (error) {
-      notify("下载失败", errorText(error));
+      notify(t("下载失败", "Download failed"), errorText(error));
     } finally {
       if (installInFlight.current === operationToken) {
         installInFlight.current = null;
@@ -1634,7 +1833,7 @@ function Content() {
     try {
       const bridge = await prepareTrainerBridge(operationAppId, binding.id);
       if (!bridge.supported) {
-        notify("同步组件不可用", bridge.reason);
+        notify(t("同步组件不可用", "Synchronization unavailable"), bridge.reason);
         acceptRuntimeSnapshot(await getTrainerRuntime(operationAppId));
         return;
       }
@@ -1649,7 +1848,10 @@ function Content() {
         binding.executable,
       );
       if (selectedAppIdRef.current !== operationAppId) {
-        throw new Error("目标游戏已经变化，已停止更新启动项");
+        throw new Error(t(
+          "目标游戏已经变化，已停止更新启动项",
+          "The target game changed, so updating launch options was stopped.",
+        ));
       }
       const refreshedBinding = await bindTrainer(
         operationAppId,
@@ -1672,13 +1874,22 @@ function Content() {
         setNeedsRestart(target.running);
       }
       notify(
-        "同步组件已准备",
+        t("同步组件已准备", "Synchronization ready"),
         target.running
-          ? "请退出并重新启动游戏，使 bridge 与修改器一同加载"
-          : "下次启动游戏时将自动连接修改器面板",
+          ? t(
+            "请退出并重新启动游戏，使 bridge 与修改器一同加载",
+            "Exit and restart the game so the bridge loads with the trainer.",
+          )
+          : t(
+            "下次启动游戏时将自动连接修改器面板",
+            "The trainer panel will connect automatically the next time the game starts.",
+          ),
       );
     } catch (error) {
-      notify("准备同步组件失败", errorText(error));
+      notify(
+        t("准备同步组件失败", "Could not prepare synchronization"),
+        errorText(error),
+      );
     } finally {
       setBusy(null);
     }
@@ -1714,7 +1925,7 @@ function Content() {
       acceptRuntimeSnapshot(snapshot);
       operationSucceeded = true;
     } catch (error) {
-      notify("修改器操作失败", errorText(error));
+      notify(t("修改器操作失败", "Trainer operation failed"), errorText(error));
       try {
         acceptRuntimeSnapshot(await getTrainerRuntime(operationAppId));
       } catch {
@@ -1763,7 +1974,10 @@ function Content() {
       acceptRuntimeSnapshot(snapshot);
       operationSucceeded = true;
     } catch (error) {
-      notify("写入修改器数值失败", errorText(error));
+      notify(
+        t("写入修改器数值失败", "Could not write trainer value"),
+        errorText(error),
+      );
       try {
         acceptRuntimeSnapshot(await getTrainerRuntime(operationAppId));
       } catch {
@@ -1807,7 +2021,10 @@ function Content() {
       acceptRuntimeSnapshot(snapshot);
       operationSucceeded = true;
     } catch (error) {
-      notify("执行修改器动作失败", errorText(error));
+      notify(
+        t("执行修改器动作失败", "Trainer action failed"),
+        errorText(error),
+      );
       try {
         acceptRuntimeSnapshot(await getTrainerRuntime(operationAppId));
       } catch {
@@ -1833,10 +2050,16 @@ function Content() {
     setBusy("unbind");
     try {
       if (selectedAppIdRef.current !== operationAppId) {
-        throw new Error("目标游戏已经变化，已停止解除绑定");
+        throw new Error(t(
+          "目标游戏已经变化，已停止解除绑定",
+          "The target game changed, so unbinding was stopped.",
+        ));
       }
       if (!binding) {
-        throw new Error("当前游戏没有 TrainerDeck 绑定");
+        throw new Error(t(
+          "当前游戏没有 TrainerDeck 绑定",
+          "The current game does not have a TrainerDeck binding.",
+        ));
       }
       await restoreTrainerLaunchBinding({
         app_id: operationAppId,
@@ -1850,11 +2073,14 @@ function Content() {
       });
       setBinding(null);
       notify(
-        "已解除绑定",
-        "已恢复目标启动项，修改器文件仍保留在下载目录中",
+        t("已解除绑定", "Trainer unbound"),
+        t(
+          "已恢复目标启动项，修改器文件仍保留在下载目录中",
+          "The target launch options were restored. Trainer files remain in the download folder.",
+        ),
       );
     } catch (error) {
-      notify("解除绑定失败", errorText(error));
+      notify(t("解除绑定失败", "Could not unbind trainer"), errorText(error));
     } finally {
       setBusy(null);
     }
@@ -1866,7 +2092,7 @@ function Content() {
       Navigation.CloseSideMenus?.();
       Navigation.Navigate(SETTINGS_ROUTE);
     } catch (error) {
-      notify("打开设置失败", errorText(error));
+      notify(t("打开设置失败", "Could not open settings"), errorText(error));
     }
   }, []);
 
@@ -1876,7 +2102,10 @@ function Content() {
       Navigation.CloseSideMenus?.();
       Navigation.Navigate(RECOVERY_ROUTE);
     } catch (error) {
-      notify("打开恢复页面失败", errorText(error));
+      notify(
+        t("打开恢复页面失败", "Could not open recovery page"),
+        errorText(error),
+      );
     }
   }, []);
 
@@ -1894,24 +2123,39 @@ function Content() {
 
   return (
     <Focusable style={{ display: "flex", flexDirection: "column" }}>
-      <PanelSection title="当前目标">
+      <PanelSection title={t("当前目标", "Current Target")}>
         <PanelSectionRow>
           <div>
             <div style={{ fontWeight: 600 }}>
               {target
                 ? target.targetType === "shortcut"
-                  ? `${target.name} · 非 Steam 快捷方式`
-                  : `${target.name} · Steam 游戏`
+                  ? t(
+                    `${target.name} · 非 Steam 快捷方式`,
+                    `${target.name} · Non-Steam shortcut`,
+                  )
+                  : t(
+                    `${target.name} · Steam 游戏`,
+                    `${target.name} · Steam game`,
+                  )
                 : runningAppId > 0
-                  ? "正在读取当前游戏信息"
-                  : "当前没有游戏在运行"}
+                  ? t("正在读取当前游戏信息", "Reading current game information")
+                  : t("当前没有游戏在运行", "No game is currently running")}
             </div>
             <SmallNote>
               {target?.running
                 ? target.targetType === "shortcut"
-                  ? "已识别当前运行的非 Steam 快捷方式；绑定会写入该快捷方式自己的启动项。"
-                  : "已识别当前运行的 Steam 游戏；可以直接搜索和绑定修改器。"
-                : "启动游戏后会自动识别；也可以在下方输入中文或英文游戏名搜索。"}
+                  ? t(
+                    "已识别当前运行的非 Steam 快捷方式；绑定会写入该快捷方式自己的启动项。",
+                    "The running Non-Steam shortcut was detected. Binding will update that shortcut's own launch options.",
+                  )
+                  : t(
+                    "已识别当前运行的 Steam 游戏；可以直接搜索和绑定修改器。",
+                    "The running Steam game was detected. You can search for and bind a trainer directly.",
+                  )
+                : t(
+                  "启动游戏后会自动识别；也可以在下方输入中文或英文游戏名搜索。",
+                  "Start a game to detect it automatically, or enter a Chinese or English game name below.",
+                )}
             </SmallNote>
           </div>
         </PanelSectionRow>
@@ -1919,27 +2163,36 @@ function Content() {
 
       {!backendChecking &&
         (backendMessage || (backendStatus && !backendStatus.ok)) && (
-          <PanelSection title="插件后端">
+          <PanelSection title={t("插件后端", "Plugin Backend")}>
             <PanelSectionRow>
               <ButtonItem
                 layout="below"
                 description={
                   backendStatus?.core_ready
-                    ? `搜索、下载和设置可用；面板同步暂不可用：${backendMessage}`
-                    : `搜索仍可用；下载、绑定和设置保存暂不可用：${backendMessage}`
+                    ? t(
+                      `搜索、下载和设置可用；面板同步暂不可用：${backendMessage}`,
+                      `Search, downloads, and settings are available; panel synchronization is unavailable: ${backendMessage}`,
+                    )
+                    : t(
+                      `搜索仍可用；下载、绑定和设置保存暂不可用：${backendMessage}`,
+                      `Search is still available; downloads, binding, and settings storage are unavailable: ${backendMessage}`,
+                    )
                 }
                 onClick={() => void checkBackend()}
               >
-                重新检测后端
+                {t("重新检测后端", "Check Backend Again")}
               </ButtonItem>
             </PanelSectionRow>
           </PanelSection>
         )}
 
-      <PanelSection title="搜索修改器">
+      <PanelSection title={t("搜索修改器", "Search Trainers")}>
         <PanelSectionRow>
           <TextField
-            label="游戏名（支持中文/英文部分名称，会列出多个匹配结果）"
+            label={t(
+              "游戏名（支持中文/英文部分名称，会列出多个匹配结果）",
+              "Game name (partial Chinese or English names are supported)",
+            )}
             value={query}
             disabled={disabled}
             onChange={(event) => setQuery(event.currentTarget.value)}
@@ -1961,8 +2214,11 @@ function Content() {
             }
           >
             {busy === "search"
-              ? `${searchStage || "正在搜索…"}（点此取消）`
-              : "搜索"}
+              ? t(
+                `${searchStage || "正在搜索…"}（点此取消）`,
+                `${searchStage || "Searching…"} (select to cancel)`,
+              )
+              : t("搜索", "Search")}
           </ButtonItem>
         </PanelSectionRow>
         {warnings.map((warning) => (
@@ -1989,23 +2245,37 @@ function Content() {
             exactAppMatch || manualTargetBinding || automaticShortcutBinding;
           const matchLabel = exactAppMatch
             ? target?.targetType === "shortcut"
-              ? "已确认当前非 Steam 快捷方式"
-              : "已确认当前 Steam 游戏"
+              ? t(
+                "已确认当前非 Steam 快捷方式",
+                "Verified for the current Non-Steam shortcut",
+              )
+              : t("已确认当前 Steam 游戏", "Verified for the current Steam game")
             : automaticShortcutBinding
-              ? `自动搜索结果；选择后将绑定当前非 Steam 快捷方式 ${target?.name}`
+              ? t(
+                `自动搜索结果；选择后将绑定当前非 Steam 快捷方式 ${target?.name}`,
+                `Automatic search result; selecting it will bind the current Non-Steam shortcut ${target?.name}`,
+              )
             : manualTargetBinding
               ? target?.targetType === "shortcut"
-                ? `手动选择后将绑定非 Steam 快捷方式 ${target.name}`
-                : `手动选择后将绑定 Steam 游戏 ${target?.name}`
+                ? t(
+                  `手动选择后将绑定非 Steam 快捷方式 ${target.name}`,
+                  `Manual selection will bind the Non-Steam shortcut ${target.name}`,
+                )
+                : t(
+                  `手动选择后将绑定 Steam 游戏 ${target?.name}`,
+                  `Manual selection will bind the Steam game ${target?.name}`,
+                )
             : entry.search_match === "series"
-              ? "系列部分匹配"
-              : "未确认对应当前游戏";
+              ? t("系列部分匹配", "Partial series match")
+              : t("未确认对应当前游戏", "Not verified for the current game");
           return (
             <PanelSectionRow key={entry.id}>
               <div style={{ marginBottom: "6px" }}>
                 <div style={{ fontWeight: 600 }}>{entry.title}</div>
                 <SmallNote>
-                  {`${entry.provider}${entry.version ? ` · ${entry.version}` : " · 最新版"} · ${matchLabel}`}
+                  {`${entry.provider}${entry.version
+                    ? ` · ${entry.version}`
+                    : t(" · 最新版", " · Latest")} · ${matchLabel}`}
                 </SmallNote>
               </div>
               <ButtonItem
@@ -2020,19 +2290,31 @@ function Content() {
                 }
               >
                 {backendChecking
-                  ? "正在检测插件后端…"
+                  ? t("正在检测插件后端…", "Checking plugin backend…")
                   : backendStatus?.core_ready !== true
-                    ? "后端不可用，暂不能下载"
+                    ? t(
+                      "后端不可用，暂不能下载",
+                      "Backend unavailable; downloads are disabled",
+                    )
                     : busy === `install:${entry.id}` ||
                         busy === `download:${entry.id}`
-                      ? "正在下载与解压…"
+                      ? t("正在下载与解压…", "Downloading and extracting…")
                       : canBind
                         ? explicitTargetBinding
                           ? target?.targetType === "shortcut"
-                            ? "下载并绑定当前非 Steam 快捷方式"
-                            : "下载并绑定当前 Steam 游戏"
-                          : "下载最新版并绑定当前目标"
-                        : "仅下载最新版"}
+                            ? t(
+                              "下载并绑定当前非 Steam 快捷方式",
+                              "Download and Bind Current Non-Steam Shortcut",
+                            )
+                            : t(
+                              "下载并绑定当前 Steam 游戏",
+                              "Download and Bind Current Steam Game",
+                            )
+                          : t(
+                            "下载最新版并绑定当前目标",
+                            "Download Latest and Bind Current Target",
+                          )
+                        : t("仅下载最新版", "Download Latest Only")}
               </ButtonItem>
             </PanelSectionRow>
           );
@@ -2040,30 +2322,57 @@ function Content() {
       </PanelSection>
 
       {binding && (
-        <PanelSection title="修改器面板">
+        <PanelSection title={t("修改器面板", "Trainer Panel")}>
           <PanelSectionRow>
             <div>
               <div style={{ fontWeight: 600 }}>{binding.title}</div>
               <SmallNote>
                 {needsRestart
-                  ? "本次游戏启动时尚未加载修改器，请重启游戏。"
+                  ? t(
+                    "本次游戏启动时尚未加载修改器，请重启游戏。",
+                    "The trainer was not loaded for this game session. Restart the game.",
+                  )
                   : runtimeUpgradeRequired
-                    ? `${nativeTrainerWindowAvailable ? "原生修改器窗口保持可用；" : ""}当前仍在运行旧版同步组件${runtime?.bridge_version ? ` ${runtime.bridge_version}` : ""}；升级并重启游戏后，可连续操作多个项目。`
+                    ? t(
+                      `${nativeTrainerWindowAvailable ? "原生修改器窗口保持可用；" : ""}当前仍在运行旧版同步组件${runtime?.bridge_version ? ` ${runtime.bridge_version}` : ""}；升级并重启游戏后，可连续操作多个项目。`,
+                      `${nativeTrainerWindowAvailable ? "The native trainer window remains available; " : ""}an older synchronization component${runtime?.bridge_version ? ` ${runtime.bridge_version}` : ""} is still running. Upgrade and restart the game to operate multiple options continuously.`,
+                    )
                   : runtime?.connected && runtime.game_available
                     ? nativeTrainerWindowAvailable
-                      ? "已连接修改器核心。原生修改器窗口与 TrainerDeck 菜单同时可用；修改后菜单保持打开，可继续操作其他项目。"
-                      : "已连接修改器核心。修改后菜单保持打开，可继续操作其他项目；失败时会留在此处显示原因。"
+                      ? t(
+                        "已连接修改器核心。原生修改器窗口与 TrainerDeck 菜单同时可用；修改后菜单保持打开，可继续操作其他项目。",
+                        "Connected to the trainer core. The native trainer window and TrainerDeck menu are both available; the menu stays open after changes so you can continue with other options.",
+                      )
+                      : t(
+                        "已连接修改器核心。修改后菜单保持打开，可继续操作其他项目；失败时会留在此处显示原因。",
+                        "Connected to the trainer core. The menu stays open after changes so you can continue with other options; failures remain visible here.",
+                      )
                     : runtime?.status === "disconnected" &&
                         runtime.options.length > 0
-                      ? `${runtime.message || "bridge 连接已断开"}；上次识别的 ${runtime.options.length} 个修改项已保留，自动重连前暂不可操作。`
+                      ? t(
+                        `${runtime.message || "bridge 连接已断开"}；上次识别的 ${runtime.options.length} 个修改项已保留，自动重连前暂不可操作。`,
+                        `${runtime.message || "The bridge is disconnected"}. ${runtime.options.length} previously detected trainer options were preserved and cannot be used until automatic reconnection.`,
+                      )
                     : runtime?.message ||
                       (runtime?.status === "waiting"
-                        ? "同步组件已准备；启动游戏后将自动连接。"
+                        ? t(
+                          "同步组件已准备；启动游戏后将自动连接。",
+                          "Synchronization is ready and will connect automatically after the game starts.",
+                        )
                         : runtime?.status === "unsupported"
-                          ? "当前安装暂不支持直接同步。"
+                          ? t(
+                            "当前安装暂不支持直接同步。",
+                            "This installation does not currently support direct synchronization.",
+                          )
                           : target?.running
-                            ? "正在等待修改器 bridge 连接。"
-                            : "修改器已绑定；启动游戏后将随同一 Proton 前缀运行。")}
+                            ? t(
+                              "正在等待修改器 bridge 连接。",
+                              "Waiting for the trainer bridge to connect.",
+                            )
+                            : t(
+                              "修改器已绑定；启动游戏后将随同一 Proton 前缀运行。",
+                              "The trainer is bound and will run in the same Proton prefix after the game starts.",
+                            ))}
               </SmallNote>
             </div>
           </PanelSectionRow>
@@ -2075,19 +2384,25 @@ function Content() {
                 onClick={() => void prepareCurrentBridge()}
               >
                 {busy === "prepare-bridge"
-                  ? "正在准备同步组件…"
+                  ? t("正在准备同步组件…", "Preparing synchronization…")
                   : runtimeUpgradeRequired
-                    ? "升级直接同步组件"
-                    : "准备或修复直接同步"}
+                    ? t(
+                      "升级直接同步组件",
+                      "Upgrade Direct Synchronization",
+                    )
+                    : t(
+                      "准备或修复直接同步",
+                      "Prepare or Repair Direct Synchronization",
+                    )}
               </ButtonItem>
             </PanelSectionRow>
           )}
           {runtime &&
             runtime.options.map((option, index) => {
-              const group = localizedText(option.group);
+              const group = localizedTrainerText(option.group);
               const previousGroup =
                 index > 0
-                  ? localizedText(runtime.options[index - 1].group)
+                  ? localizedTrainerText(runtime.options[index - 1].group)
                   : "";
               return (
                 <Fragment key={option.id}>
@@ -2136,37 +2451,42 @@ function Content() {
               disabled={disabled}
               onClick={() => void removeBinding()}
             >
-              解除绑定（保留文件）
+              {t("解除绑定（保留文件）", "Unbind (Keep Files)")}
             </ButtonItem>
           </PanelSectionRow>
         </PanelSection>
       )}
 
-      <PanelSection title="安全提示">
+      <PanelSection title={t("安全提示", "Safety Notice")}>
         <PanelSectionRow>
           <SmallNote>
-            仅建议用于单机或离线游戏。插件不会绕过反作弊；修改器是第三方 Windows
-            程序，下载和运行前请自行确认来源与风险。
+            {t(
+              "仅建议用于单机或离线游戏。插件不会绕过反作弊；修改器是第三方 Windows 程序，下载和运行前请自行确认来源与风险。",
+              "Recommended only for single-player or offline games. This plugin does not bypass anti-cheat systems. Trainers are third-party Windows programs; verify their source and risks before downloading or running them.",
+            )}
           </SmallNote>
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="故障恢复">
+      <PanelSection title={t("故障恢复", "Recovery")}>
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            description="游戏无法启动时，按目标类型恢复 TrainerDeck 改写前的启动项"
+            description={t(
+              "游戏无法启动时，按目标类型恢复 TrainerDeck 改写前的启动项",
+              "If a game no longer starts, restore the launch options from before TrainerDeck changed them.",
+            )}
             onClick={openRecoveryPage}
           >
-            一键恢复启动项
+            {t("一键恢复启动项", "Restore Launch Options")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="设置">
+      <PanelSection title={t("设置", "Settings")}>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={openSettingsPage}>
-            打开设置
+            {t("打开设置", "Open Settings")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>

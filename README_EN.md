@@ -7,6 +7,7 @@ TrainerDeck is a Decky Loader plugin for Steam Deck Game Mode. It can identify t
 ## Key Features
 
 - Automatically detects the currently running Steam game or non-Steam shortcut.
+- Automatically displays the plugin menu in Chinese or English based on the SteamOS system language; other system languages default to English.
 - Searches for FLiNG trainers in Chinese or English; automatic search and setup for the current game can be enabled separately.
 - Binds a trainer to the corresponding Steam library entry and adds CheatDeck-compatible launch options.
 - Provides a Decky control panel for newer FLiNG trainers released in 2019 or later, including toggles, numeric inputs, and one-shot actions.

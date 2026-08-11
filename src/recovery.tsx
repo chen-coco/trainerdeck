@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { withTimeout } from "./async";
 import { listBindings, unbindTrainer } from "./backend";
+import { t } from "./i18n";
 import {
   readAppDetails,
   recoverTrainerLaunchOptions,
@@ -25,15 +26,15 @@ function launchOptionsEqual(left: string, right: string): boolean {
 }
 
 function recordName(record: TrainerBindingRecord): string {
-  return record.display_name || record.title || "未知游戏";
+  return record.display_name || record.title || t("未知游戏", "Unknown game");
 }
 
 function recordTargetLabel(record: TrainerBindingRecord): string {
   return record.target_type === "shortcut"
-    ? "非 Steam 快捷方式"
+    ? t("非 Steam 快捷方式", "Non-Steam shortcut")
     : record.target_type === "steam"
-      ? "Steam 游戏"
-      : "游戏";
+      ? t("Steam 游戏", "Steam game")
+      : t("游戏", "Game");
 }
 
 export type TrainerLaunchBindingRecovery = Pick<
@@ -74,12 +75,18 @@ export async function restoreTrainerLaunchBinding(
     : null;
   if (recordedTargetType && details.targetType !== recordedTargetType) {
     throw new Error(
-      "当前游戏的目标类型与绑定记录不一致；为避免恢复到另一个游戏，已停止操作",
+      t(
+        "当前游戏的目标类型与绑定记录不一致；为避免恢复到另一个游戏，已停止操作",
+        "The current game type does not match the binding record. Recovery was stopped to avoid changing another game.",
+      ),
     );
   }
   if (details.targetType === "steam" && recordedLaunchField === "shortcut") {
     throw new Error(
-      "Steam 游戏的绑定记录不能指向快捷方式启动项，已停止操作",
+      t(
+        "Steam 游戏的绑定记录不能指向快捷方式启动项，已停止操作",
+        "A Steam game binding cannot point to shortcut launch options. Recovery was stopped.",
+      ),
     );
   }
   if (
@@ -88,7 +95,10 @@ export async function restoreTrainerLaunchBinding(
     details.shortcutExe?.trim() !== record.shortcut_exe.trim()
   ) {
     throw new Error(
-      "非 Steam 快捷方式的可执行文件已经变化；为避免恢复到另一个游戏，已停止操作",
+      t(
+        "非 Steam 快捷方式的可执行文件已经变化；为避免恢复到另一个游戏，已停止操作",
+        "The Non-Steam shortcut executable has changed. Recovery was stopped to avoid changing another game.",
+      ),
     );
   }
 
@@ -129,7 +139,10 @@ export async function restoreTrainerLaunchBinding(
   );
   if (restorable.length > 1) {
     throw new Error(
-      "普通启动项与快捷方式启动项都含有 TrainerDeck 参数，无法安全判断旧版写入位置",
+      t(
+        "普通启动项与快捷方式启动项都含有 TrainerDeck 参数，无法安全判断旧版写入位置",
+        "Both regular and shortcut launch options contain TrainerDeck parameters, so the legacy write location cannot be determined safely.",
+      ),
     );
   }
   const selected = restorable[0];
@@ -146,14 +159,20 @@ export async function restoreTrainerLaunchBinding(
     );
   } else if (!evaluated.some((candidate) => candidate.alreadyRestored)) {
     throw new Error(
-      "当前启动项已被用户或其他插件修改，无法安全确认 TrainerDeck 参数归属，因此没有覆盖",
+      t(
+        "当前启动项已被用户或其他插件修改，无法安全确认 TrainerDeck 参数归属，因此没有覆盖",
+        "The current launch options were changed by the user or another plugin. TrainerDeck could not verify parameter ownership and left them unchanged.",
+      ),
     );
   }
 
   await withTimeout(
     unbindTrainer(record.app_id, true),
     BACKEND_TIMEOUT_MS,
-    "启动项已恢复，但保存解除绑定状态超时",
+    t(
+      "启动项已恢复，但保存解除绑定状态超时",
+      "Launch options were restored, but saving the unbound state timed out.",
+    ),
   );
 }
 
@@ -173,7 +192,10 @@ export function TrainerDeckRecoveryPage() {
       const loaded = await withTimeout(
         listBindings(),
         BACKEND_TIMEOUT_MS,
-        "读取启动项恢复记录超时",
+        t(
+          "读取启动项恢复记录超时",
+          "Reading launch option recovery records timed out.",
+        ),
       );
       if (loadRequest.current !== request) {
         return;
@@ -209,12 +231,18 @@ export function TrainerDeckRecoveryPage() {
     try {
       await restoreTrainerLaunchBinding(record);
       toaster.toast({
-        title: "启动项已恢复",
-        body: `${recordName(record)}：已保留修改器文件和其他启动参数`,
+        title: t("启动项已恢复", "Launch options restored"),
+        body: t(
+          `${recordName(record)}：已保留修改器文件和其他启动参数`,
+          `${recordName(record)}: trainer files and other launch parameters were preserved.`,
+        ),
       });
       await load();
     } catch (error) {
-      toaster.toast({ title: "恢复失败", body: errorText(error) });
+      toaster.toast({
+        title: t("恢复失败", "Recovery failed"),
+        body: errorText(error),
+      });
     } finally {
       setBusy(null);
     }
@@ -233,14 +261,25 @@ export function TrainerDeckRecoveryPage() {
           await restoreTrainerLaunchBinding(record);
           restored += 1;
         } catch (error) {
-          failed.push(`${recordName(record)}：${errorText(error)}`);
+          failed.push(t(
+            `${recordName(record)}：${errorText(error)}`,
+            `${recordName(record)}: ${errorText(error)}`,
+          ));
         }
       }
       toaster.toast({
-        title: failed.length ? "启动项恢复部分完成" : "启动项恢复完成",
+        title: failed.length
+          ? t("启动项恢复部分完成", "Launch option recovery partially completed")
+          : t("启动项恢复完成", "Launch option recovery completed"),
         body: failed.length
-          ? `已恢复 ${restored} 个；${failed.join("；")}`
-          : `已恢复 ${restored} 个游戏，修改器文件仍保留`,
+          ? t(
+            `已恢复 ${restored} 个；${failed.join("；")}`,
+            `${restored} restored; ${failed.join("; ")}`,
+          )
+          : t(
+            `已恢复 ${restored} 个游戏，修改器文件仍保留`,
+            `Restored ${restored} games. Trainer files were preserved.`,
+          ),
         duration: 7000,
       });
       await load();
@@ -261,42 +300,56 @@ export function TrainerDeckRecoveryPage() {
         paddingTop: "48px",
       }}
     >
-      <PanelSection title="游戏启动项恢复">
+      <PanelSection title={t("游戏启动项恢复", "Launch Option Recovery")}>
         <PanelSectionRow>
           <div style={{ fontSize: "12px", lineHeight: 1.5 }}>
-            游戏无需处于运行状态。Steam 游戏与非 Steam 快捷方式都会按各自的启动项类型恢复；可在这里移除 TrainerDeck 写入的启动参数并解除同步绑定。
-            修改器文件不会删除，CheatDeck 和用户自己的其他启动参数会保留。
+            {t(
+              "游戏无需处于运行状态。Steam 游戏与非 Steam 快捷方式都会按各自的启动项类型恢复；可在这里移除 TrainerDeck 写入的启动参数并解除同步绑定。修改器文件不会删除，CheatDeck 和用户自己的其他启动参数会保留。",
+              "The game does not need to be running. Steam games and Non-Steam shortcuts are restored using their respective launch option types. You can remove parameters written by TrainerDeck and disconnect synchronization here. Trainer files, CheatDeck parameters, and your other launch options are preserved.",
+            )}
           </div>
         </PanelSectionRow>
         {status !== "ready" && (
           <PanelSectionRow>
             <ButtonItem
               layout="below"
-              description={status === "loading" ? "正在读取恢复记录" : message}
+              description={status === "loading"
+                ? t("正在读取恢复记录", "Loading recovery records")
+                : message}
               disabled={status === "loading"}
               onClick={() => void load()}
             >
-              {status === "loading" ? "正在读取…" : "读取失败，点此重试"}
+              {status === "loading"
+                ? t("正在读取…", "Loading…")
+                : t("读取失败，点此重试", "Load failed. Select to retry")}
             </ButtonItem>
           </PanelSectionRow>
         )}
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            description={`待恢复 ${pendingRecords.length} 个游戏`}
+            description={t(
+              `待恢复 ${pendingRecords.length} 个游戏`,
+              `${pendingRecords.length} games waiting for recovery`,
+            )}
             disabled={busy !== null || pendingRecords.length === 0}
             onClick={() => void restoreAll()}
           >
-            {busy === "all" ? "正在逐个恢复…" : "一键恢复全部启动项"}
+            {busy === "all"
+              ? t("正在逐个恢复…", "Restoring one by one…")
+              : t("一键恢复全部启动项", "Restore All Launch Options")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="游戏记录">
+      <PanelSection title={t("游戏记录", "Game Records")}>
         {status === "ready" && records.length === 0 && (
           <PanelSectionRow>
             <div style={{ fontSize: "12px", opacity: 0.78 }}>
-              当前没有 TrainerDeck 启动项记录。
+              {t(
+                "当前没有 TrainerDeck 启动项记录。",
+                "There are no TrainerDeck launch option records.",
+              )}
             </div>
           </PanelSectionRow>
         )}
@@ -306,19 +359,37 @@ export function TrainerDeckRecoveryPage() {
               layout="below"
               description={
                 record.launch_options_restored
-                  ? `${recordTargetLabel(record)} · 已恢复，修改器文件仍保留`
+                  ? t(
+                    `${recordTargetLabel(record)} · 已恢复，修改器文件仍保留`,
+                    `${recordTargetLabel(record)} · Restored; trainer files preserved`,
+                  )
                   : record.original_launch_options === null
-                    ? `${recordTargetLabel(record)} · 旧版本未保存原值，将只移除可确认属于 TrainerDeck 的参数`
-                    : `${recordTargetLabel(record)} · 将恢复启用同步前的原始启动项`
+                    ? t(
+                      `${recordTargetLabel(record)} · 旧版本未保存原值，将只移除可确认属于 TrainerDeck 的参数`,
+                      `${recordTargetLabel(record)} · The old version did not save the original value; only verified TrainerDeck parameters will be removed`,
+                    )
+                    : t(
+                      `${recordTargetLabel(record)} · 将恢复启用同步前的原始启动项`,
+                      `${recordTargetLabel(record)} · Restore the original launch options from before synchronization`,
+                    )
               }
               disabled={busy !== null || record.launch_options_restored}
               onClick={() => void restoreOne(record)}
             >
               {busy === record.app_id
-                ? `正在恢复 ${recordName(record)}…`
+                ? t(
+                  `正在恢复 ${recordName(record)}…`,
+                  `Restoring ${recordName(record)}…`,
+                )
                 : record.launch_options_restored
-                  ? `${recordName(record)} · 已恢复`
-                  : `恢复 ${recordName(record)}`}
+                  ? t(
+                    `${recordName(record)} · 已恢复`,
+                    `${recordName(record)} · Restored`,
+                  )
+                  : t(
+                    `恢复 ${recordName(record)}`,
+                    `Restore ${recordName(record)}`,
+                  )}
             </ButtonItem>
           </PanelSectionRow>
         ))}
