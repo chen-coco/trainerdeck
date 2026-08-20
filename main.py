@@ -161,7 +161,7 @@ class Plugin:
                 pass
         return {
             "ok": self.core is not None,
-            "version": "0.6.9",
+            "version": "0.7.0",
             "python_version": sys.version.split()[0],
             "core_ready": self.core is not None,
             "core_error": self.core_start_error,

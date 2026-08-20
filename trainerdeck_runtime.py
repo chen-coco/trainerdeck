@@ -34,10 +34,10 @@ CLIENT_IDLE_TIMEOUT_SECONDS = 15.0
 BRIDGE_MANIFEST_FILENAME = "trainerdeck-bridge.json"
 BRIDGE_ASSET_FILENAMES = (
     "TrainerDeckBridgeLauncher.exe",
-    "TrainerDeckBridge.dll",
     "Mono.Cecil.dll",
 )
 OBSOLETE_MULTI_BRIDGE_ASSET_FILENAMES = (
+    "TrainerDeckBridge.dll",
     "TrainerDeckBridge.Legacy.dll",
     "TrainerDeckBridgeLauncher.exe.config",
 )
@@ -265,18 +265,29 @@ class TrainerRuntimeManager:
         self._tokens: dict[int, str] = {}
         self._writers: dict[int, asyncio.StreamWriter] = {}
         self._write_locks: dict[int, asyncio.Lock] = {}
+        self._inbound_writers: set[asyncio.StreamWriter] = set()
+        self._handler_tasks: set[asyncio.Task[Any]] = set()
         self._pending_tasks: set[asyncio.Task[Any]] = set()
+        self._prepare_lock = threading.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._lifecycle_generation = 0
+        self._stopping = True
+        self._installation_owners: dict[str, int] = {}
+        self._owned_installations: dict[int, str] = {}
         self._on_change: (
             Callable[[dict[str, Any]], Awaitable[None] | None] | None
         ) = None
 
     @property
     def running(self) -> bool:
-        return self._server is not None
+        return self._server is not None and not self._stopping
 
     @property
     def port(self) -> int:
         return self._port
+
+    def _lifecycle_is_current(self, generation: int) -> bool:
+        return self.running and generation == self._lifecycle_generation
 
     async def start(
         self,
@@ -286,51 +297,137 @@ class TrainerRuntimeManager:
         ]
         | None = None,
     ) -> None:
-        if self._server is not None:
-            return
-        self._on_change = on_change
-        self._server = await asyncio.start_server(
-            self._handle_client,
-            self._host,
-            0,
-            limit=MAX_FRAME_BYTES + 4,
-        )
-        sockets = self._server.sockets or []
-        if not sockets:
-            await self.stop()
-            raise TrainerRuntimeError("无法启动修改器 bridge 端点")
-        self._port = int(sockets[0].getsockname()[1])
+        async with self._lifecycle_lock:
+            if self.running:
+                return
+            self._on_change = on_change
+            server = await asyncio.start_server(
+                self._accept_client,
+                self._host,
+                0,
+                limit=MAX_FRAME_BYTES + 4,
+            )
+            sockets = server.sockets or []
+            if not sockets:
+                server.close()
+                await server.wait_closed()
+                raise TrainerRuntimeError("无法启动修改器 bridge 端点")
+            self._server = server
+            self._port = int(sockets[0].getsockname()[1])
+            self._lifecycle_generation += 1
+            self._stopping = False
 
     async def stop(self) -> None:
-        server = self._server
-        self._server = None
-        if server is not None:
-            server.close()
-            await server.wait_closed()
-        for session in list(self._sessions.values()):
-            for request_id in list(session["pending"]):
-                self._finish_pending(
-                    session,
-                    request_id,
-                    "bridge 服务已停止，操作结果未知",
+        async with self._lifecycle_lock:
+            # Publish the closing generation before the first await. A prepare
+            # already holding the file lock will observe the generation change;
+            # queued prepares will fail their running check after acquiring it.
+            self._stopping = True
+            self._lifecycle_generation += 1
+            server = self._server
+            self._server = None
+            if server is not None:
+                server.close()
+            for session in list(self._sessions.values()):
+                for request_id in list(session["pending"]):
+                    self._finish_pending(
+                        session,
+                        request_id,
+                        "bridge 服务已停止，操作结果未知",
+                    )
+            await self._close_inbound_clients()
+            if server is not None:
+                await server.wait_closed()
+            # Flush any accept callback that was already queued when close()
+            # ran, then drain the synchronously registered writer/task too.
+            await self._close_inbound_clients()
+            self._writers.clear()
+            self._write_locks.clear()
+            self._handler_tasks.clear()
+            self._inbound_writers.clear()
+            for task in list(self._pending_tasks):
+                task.cancel()
+            if self._pending_tasks:
+                await asyncio.gather(
+                    *self._pending_tasks,
+                    return_exceptions=True,
                 )
-        for writer in list(self._writers.values()):
-            writer.close()
-        for writer in list(self._writers.values()):
-            try:
-                await writer.wait_closed()
-            except (ConnectionError, OSError):
-                pass
-        self._writers.clear()
-        self._write_locks.clear()
-        for task in list(self._pending_tasks):
-            task.cancel()
-        if self._pending_tasks:
-            await asyncio.gather(*self._pending_tasks, return_exceptions=True)
-        self._pending_tasks.clear()
-        self._sessions.clear()
-        self._tokens.clear()
-        self._port = 0
+            self._pending_tasks.clear()
+            self._sessions.clear()
+            # Never block the event-loop thread on an in-flight file prepare.
+            # The worker takes the same lock and is the final writer before
+            # stop returns.
+            await asyncio.to_thread(self._finalize_stop)
+            self._port = 0
+
+    async def _close_inbound_clients(self) -> None:
+        await asyncio.sleep(0)
+        while (
+            self._inbound_writers
+            or self._writers
+            or any(not task.done() for task in self._handler_tasks)
+        ):
+            inbound_writers = self._inbound_writers | set(
+                self._writers.values()
+            )
+            handler_tasks = {
+                task
+                for task in self._handler_tasks
+                if task is not asyncio.current_task() and not task.done()
+            }
+            for writer in inbound_writers:
+                writer.close()
+            for task in handler_tasks:
+                task.cancel()
+            if handler_tasks:
+                await asyncio.gather(
+                    *handler_tasks,
+                    return_exceptions=True,
+                )
+            for writer in inbound_writers:
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, OSError):
+                    pass
+            for app_id, registered_writer in list(self._writers.items()):
+                if registered_writer in inbound_writers:
+                    self._writers.pop(app_id, None)
+                    self._write_locks.pop(app_id, None)
+            self._handler_tasks.difference_update(handler_tasks)
+            self._handler_tasks.difference_update(
+                {task for task in self._handler_tasks if task.done()}
+            )
+            self._inbound_writers.difference_update(inbound_writers)
+            await asyncio.sleep(0)
+
+    def _accept_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Synchronously register an accepted socket before task scheduling."""
+        accepted_generation = self._lifecycle_generation
+        self._inbound_writers.add(writer)
+        handler_task = asyncio.create_task(
+            self._handle_client(
+                reader,
+                writer,
+                accepted_generation,
+            )
+        )
+        self._handler_tasks.add(handler_task)
+        handler_task.add_done_callback(self._handler_tasks.discard)
+
+    def _finalize_stop(self) -> None:
+        with self._prepare_lock:
+            # Outer manifests are intentionally left in place. Their tokens
+            # become inert as soon as this state is cleared, and a later
+            # prepare atomically replaces them. Avoiding path-based deletion
+            # prevents clobbering a manifest published by another process.
+            self._prepared.clear()
+            self._tokens.clear()
+            self._installation_owners.clear()
+            self._owned_installations.clear()
 
     def _asset_error(self) -> str:
         missing = [
@@ -371,14 +468,33 @@ class TrainerRuntimeManager:
         app_id: int,
         installation: dict[str, Any],
     ) -> dict[str, Any]:
-        if not self.running:
-            raise TrainerRuntimeError("bridge 后端尚未启动")
         try:
             numeric_app_id = int(app_id)
         except (TypeError, ValueError) as error:
             raise TrainerRuntimeError("Steam AppID 无效") from error
         if numeric_app_id <= 0:
             raise TrainerRuntimeError("Steam AppID 无效")
+
+        # prepare_bridge is called both from the event-loop startup path and
+        # through asyncio.to_thread. Serialize the complete ownership and file
+        # transaction so concurrent refreshes cannot share temporary paths or
+        # publish a manifest for the wrong AppID.
+        with self._prepare_lock:
+            if not self.running:
+                raise TrainerRuntimeError("bridge 后端尚未启动或正在停止")
+            lifecycle_generation = self._lifecycle_generation
+            return self._prepare_bridge_locked(
+                numeric_app_id,
+                installation,
+                lifecycle_generation,
+            )
+
+    def _prepare_bridge_locked(
+        self,
+        numeric_app_id: int,
+        installation: dict[str, Any],
+        lifecycle_generation: int,
+    ) -> dict[str, Any]:
 
         folder = Path(str(installation.get("folder") or "")).resolve()
         executable = Path(str(installation.get("executable") or "")).resolve()
@@ -388,6 +504,14 @@ class TrainerRuntimeManager:
             executable_relative = executable.relative_to(folder)
         except ValueError as error:
             raise TrainerRuntimeError("修改器 EXE 不在安装目录内") from error
+
+        installation_key = self._installation_key(folder)
+        owner_app_id = self._installation_owners.get(installation_key)
+        if owner_app_id is not None and owner_app_id != numeric_app_id:
+            raise TrainerRuntimeError(
+                "这个修改器安装已由 Steam AppID "
+                f"{owner_app_id} 使用，请先解除原绑定"
+            )
 
         error = self._asset_error()
         if error:
@@ -406,25 +530,7 @@ class TrainerRuntimeManager:
 
         folder.mkdir(parents=True, exist_ok=True)
         trainer_sha256 = self._sha256_file(executable)
-        for name in OBSOLETE_MULTI_BRIDGE_ASSET_FILENAMES:
-            obsolete = folder / name
-            try:
-                obsolete.unlink(missing_ok=True)
-            except OSError as error:
-                raise TrainerRuntimeError(
-                    f"无法删除旧的多 Bridge 资产：{obsolete}"
-                ) from error
-        copied: list[str] = []
-        for name in BRIDGE_ASSET_FILENAMES:
-            source = self.bridge_assets_dir / name
-            if not source.is_file():
-                continue
-            destination = folder / name
-            shutil.copy2(source, destination)
-            copied.append(name)
-
         token = os.urandom(32).hex()
-        self._tokens[numeric_app_id] = token
         manifest = {
             "protocol": BRIDGE_PROTOCOL_VERSION,
             "host": self._host,
@@ -436,18 +542,34 @@ class TrainerRuntimeManager:
             "generated_at": int(time.time()),
         }
         manifest_path = folder / BRIDGE_MANIFEST_FILENAME
-        temporary = manifest_path.with_name(
-            f".{manifest_path.name}.{os.getpid()}.tmp"
+        copied = self._deploy_bridge_files(
+            folder,
+            manifest_path,
+            manifest,
         )
-        temporary.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        if (
+            not self.running
+            or lifecycle_generation != self._lifecycle_generation
+        ):
+            raise TrainerRuntimeError("bridge 后端已停止，未提交准备结果")
+
+        previous_installation_key = self._owned_installations.get(
+            numeric_app_id
         )
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, manifest_path)
+        if (
+            previous_installation_key
+            and previous_installation_key != installation_key
+            and self._installation_owners.get(previous_installation_key)
+            == numeric_app_id
+        ):
+            self._installation_owners.pop(previous_installation_key, None)
+        self._installation_owners[installation_key] = numeric_app_id
+        self._owned_installations[numeric_app_id] = installation_key
+        self._tokens[numeric_app_id] = token
         launcher = folder / "TrainerDeckBridgeLauncher.exe"
         prepared = {
             "app_id": numeric_app_id,
+            "installation_id": str(installation.get("id") or ""),
             "supported": True,
             "status": "waiting",
             "reason": "",
@@ -459,6 +581,141 @@ class TrainerRuntimeManager:
         self._prepared[numeric_app_id] = prepared
         self._bump_revision(numeric_app_id)
         return copy.deepcopy(prepared)
+
+    @staticmethod
+    def _installation_key(folder: Path) -> str:
+        physical_folder = os.path.normcase(
+            os.path.normpath(str(folder.resolve()))
+        )
+        return f"folder:{physical_folder}"
+
+    def _deploy_bridge_files(
+        self,
+        folder: Path,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+    ) -> list[str]:
+        """Stage and atomically publish Host, Cecil, and the launch manifest."""
+        transaction_id = uuid.uuid4().hex
+        replacements: list[dict[str, Any]] = []
+        obsolete_moves: list[tuple[Path, Path]] = []
+        copied: list[str] = []
+
+        try:
+            for name in BRIDGE_ASSET_FILENAMES:
+                source = self.bridge_assets_dir / name
+                if not source.is_file():
+                    continue
+                destination = folder / name
+                staging = destination.with_name(
+                    f".{destination.name}.{transaction_id}.stage"
+                )
+                backup = destination.with_name(
+                    f".{destination.name}.{transaction_id}.backup"
+                )
+                replacement = {
+                    "destination": destination,
+                    "staging": staging,
+                    "backup": backup,
+                    "had_original": False,
+                    "installed": False,
+                    "rollback_failed": False,
+                }
+                replacements.append(replacement)
+                shutil.copy2(source, staging)
+                copied.append(name)
+
+            manifest_staging = manifest_path.with_name(
+                f".{manifest_path.name}.{transaction_id}.stage"
+            )
+            manifest_backup = manifest_path.with_name(
+                f".{manifest_path.name}.{transaction_id}.backup"
+            )
+            manifest_replacement = {
+                "destination": manifest_path,
+                "staging": manifest_staging,
+                "backup": manifest_backup,
+                "had_original": False,
+                "installed": False,
+                "rollback_failed": False,
+            }
+            replacements.append(manifest_replacement)
+            manifest_staging.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(manifest_staging, 0o600)
+
+            for replacement in replacements:
+                destination = replacement["destination"]
+                if destination.exists():
+                    # Keep the current Host/manifest continuously visible.
+                    # The one operation that changes the live path is the
+                    # atomic stage-to-destination replacement below.
+                    shutil.copy2(destination, replacement["backup"])
+                    replacement["had_original"] = True
+                os.replace(replacement["staging"], destination)
+                replacement["installed"] = True
+
+            # Retire the old external bridge only after the complete new Host
+            # deployment is visible. Moving it aside keeps rollback possible.
+            for name in OBSOLETE_MULTI_BRIDGE_ASSET_FILENAMES:
+                obsolete = folder / name
+                if not obsolete.exists():
+                    continue
+                backup = obsolete.with_name(
+                    f".{obsolete.name}.{transaction_id}.obsolete"
+                )
+                os.replace(obsolete, backup)
+                obsolete_moves.append((obsolete, backup))
+        except (OSError, shutil.Error) as error:
+            rollback_errors: list[str] = []
+            for destination, backup in reversed(obsolete_moves):
+                try:
+                    os.replace(backup, destination)
+                except OSError as rollback_error:
+                    rollback_errors.append(str(rollback_error))
+            for replacement in reversed(replacements):
+                destination = replacement["destination"]
+                try:
+                    if replacement["installed"] and replacement["had_original"]:
+                        os.replace(replacement["backup"], destination)
+                    elif replacement["installed"]:
+                        destination.unlink(missing_ok=True)
+                except OSError as rollback_error:
+                    replacement["rollback_failed"] = True
+                    rollback_errors.append(str(rollback_error))
+            for replacement in replacements:
+                if replacement["rollback_failed"]:
+                    continue
+                try:
+                    replacement["backup"].unlink(missing_ok=True)
+                except OSError:
+                    pass
+            detail = ""
+            if rollback_errors:
+                detail = "；部分旧文件未能自动恢复"
+            raise TrainerRuntimeError(
+                f"无法安全更新修改器同步组件{detail}：{error}"
+            ) from error
+        finally:
+            for replacement in replacements:
+                try:
+                    replacement["staging"].unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        for replacement in replacements:
+            try:
+                replacement["backup"].unlink(missing_ok=True)
+            except OSError:
+                pass
+        for _destination, backup in obsolete_moves:
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return copied
 
     @staticmethod
     def _sha256_file(path: Path) -> str:
@@ -535,20 +792,22 @@ class TrainerRuntimeManager:
         self._bump_revision(numeric_app_id)
 
     async def revoke_app(self, app_id: int) -> None:
-        """Revoke authentication and remove the generated launch manifest."""
+        """Revoke authentication while leaving an inert manifest in place."""
         numeric_app_id = int(app_id)
-        prepared = self._prepared.pop(numeric_app_id, None)
-        self._tokens.pop(numeric_app_id, None)
+        with self._prepare_lock:
+            self._prepared.pop(numeric_app_id, None)
+            self._tokens.pop(numeric_app_id, None)
+            installation_key = self._owned_installations.pop(
+                numeric_app_id,
+                None,
+            )
+            if (
+                installation_key
+                and self._installation_owners.get(installation_key)
+                == numeric_app_id
+            ):
+                self._installation_owners.pop(installation_key, None)
         await self.invalidate_app(numeric_app_id)
-        if prepared:
-            manifest_value = prepared.get("manifest")
-            if manifest_value:
-                manifest_path = Path(str(manifest_value))
-                if manifest_path.name == BRIDGE_MANIFEST_FILENAME:
-                    try:
-                        manifest_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
         await self.emit_snapshot(numeric_app_id)
 
     def _public_snapshot(self, session: dict[str, Any]) -> dict[str, Any]:
@@ -584,17 +843,23 @@ class TrainerRuntimeManager:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        accepted_generation: int,
     ) -> None:
         app_id = 0
         session_id = ""
-        peer = writer.get_extra_info("peername")
-        if not peer or peer[0] not in {"127.0.0.1", "::1"}:
-            writer.close()
-            await writer.wait_closed()
-            return
+        handler_task = asyncio.current_task()
         try:
+            if not self._lifecycle_is_current(accepted_generation):
+                raise TrainerRuntimeError("bridge 后端正在停止")
+            peer = writer.get_extra_info("peername")
+            if not peer or peer[0] not in {"127.0.0.1", "::1"}:
+                raise TrainerRuntimeError("bridge 只接受本机连接")
             hello = await asyncio.wait_for(_read_frame(reader), timeout=5.0)
+            if not self._lifecycle_is_current(accepted_generation):
+                raise TrainerRuntimeError("bridge 后端已停止")
             app_id, session_id = self._validate_hello(hello)
+            if not self._lifecycle_is_current(accepted_generation):
+                raise TrainerRuntimeError("bridge 认证期间后端已停止")
             previous = self._writers.get(app_id)
             if previous is not None and previous is not writer:
                 previous_session = self._sessions.get(app_id)
@@ -631,6 +896,11 @@ class TrainerRuntimeManager:
                 "last_seen": time.monotonic(),
             }
             self._sessions[app_id] = session
+            if not self._lifecycle_is_current(accepted_generation):
+                self._writers.pop(app_id, None)
+                self._write_locks.pop(app_id, None)
+                self._sessions.pop(app_id, None)
+                raise TrainerRuntimeError("bridge 注册期间后端已停止")
             await _write_frame(
                 writer,
                 {
@@ -640,7 +910,19 @@ class TrainerRuntimeManager:
                 },
                 self._write_locks[app_id],
             )
+            if (
+                not self._lifecycle_is_current(accepted_generation)
+                or self._writers.get(app_id) is not writer
+                or self._sessions.get(app_id) is not session
+            ):
+                raise TrainerRuntimeError("bridge 注册后后端已停止")
             await self._emit(self._public_snapshot(session))
+            if (
+                not self._lifecycle_is_current(accepted_generation)
+                or self._writers.get(app_id) is not writer
+                or self._sessions.get(app_id) is not session
+            ):
+                raise TrainerRuntimeError("bridge 后端已停止")
 
             while True:
                 message = await asyncio.wait_for(
@@ -680,7 +962,11 @@ class TrainerRuntimeManager:
             OSError,
             TrainerRuntimeError,
         ) as error:
-            if app_id and self._writers.get(app_id) is writer:
+            if (
+                self._lifecycle_is_current(accepted_generation)
+                and app_id
+                and self._writers.get(app_id) is writer
+            ):
                 await self._mark_disconnected(
                     app_id,
                     session_id,
@@ -690,6 +976,9 @@ class TrainerRuntimeManager:
             if app_id and self._writers.get(app_id) is writer:
                 self._writers.pop(app_id, None)
                 self._write_locks.pop(app_id, None)
+            self._inbound_writers.discard(writer)
+            if handler_task is not None:
+                self._handler_tasks.discard(handler_task)
             writer.close()
             try:
                 await writer.wait_closed()

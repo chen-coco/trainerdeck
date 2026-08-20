@@ -1,10 +1,14 @@
 import asyncio
 import json
+import os
+import shutil
 import struct
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from trainerdeck_runtime import (
     BRIDGE_ASSET_FILENAMES,
@@ -195,12 +199,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(self.manifest["trainer_sha256"], "a" * 64)
         self.assertEqual(len(self.manifest["token"]), 64)
         self.assertTrue(
-            (self.installation_folder / "TrainerDeckBridge.dll").is_file()
+            (
+                self.installation_folder
+                / "TrainerDeckBridgeLauncher.exe"
+            ).is_file()
         )
-        self.assertNotIn(
-            "TrainerDeckBridge.Legacy.dll",
-            BRIDGE_ASSET_FILENAMES,
+        self.assertTrue(
+            (self.installation_folder / "Mono.Cecil.dll").is_file()
         )
+        self.assertFalse(
+            (self.installation_folder / "TrainerDeckBridge.dll").exists()
+        )
+        for obsolete in OBSOLETE_MULTI_BRIDGE_ASSET_FILENAMES:
+            self.assertNotIn(obsolete, BRIDGE_ASSET_FILENAMES)
 
     async def test_prepare_bridge_overwrites_assets_from_an_older_binding(self):
         expected = {}
@@ -238,6 +249,317 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((self.installation_folder / name).exists())
         self.assertEqual(unrelated.read_bytes(), b"preserve")
 
+    async def test_prepare_bridge_serializes_concurrent_file_transactions(self):
+        real_copy2 = shutil.copy2
+        real_replace = os.replace
+        counter_lock = threading.Lock()
+        active_copies = 0
+        maximum_active_copies = 0
+        manifest_staging_names = []
+        live_paths_visible_before_publish = []
+
+        def slow_copy(source, destination, *args, **kwargs):
+            nonlocal active_copies, maximum_active_copies
+            with counter_lock:
+                active_copies += 1
+                maximum_active_copies = max(
+                    maximum_active_copies,
+                    active_copies,
+                )
+            try:
+                time.sleep(0.02)
+                return real_copy2(source, destination, *args, **kwargs)
+            finally:
+                with counter_lock:
+                    active_copies -= 1
+
+        def record_replace(source, destination):
+            source_path = Path(source)
+            destination_path = Path(destination)
+            if (
+                destination_path.name == "trainerdeck-bridge.json"
+                and source_path.name.endswith(".stage")
+            ):
+                manifest_staging_names.append(source_path.name)
+            if source_path.name.endswith(".stage"):
+                live_paths_visible_before_publish.append(
+                    destination_path.exists()
+                )
+            return real_replace(source, destination)
+
+        with (
+            patch("trainerdeck_runtime.shutil.copy2", side_effect=slow_copy),
+            patch("trainerdeck_runtime.os.replace", side_effect=record_replace),
+        ):
+            results = await asyncio.gather(
+                asyncio.to_thread(
+                    self.manager.prepare_bridge,
+                    1234,
+                    self.installation,
+                ),
+                asyncio.to_thread(
+                    self.manager.prepare_bridge,
+                    1234,
+                    self.installation,
+                ),
+            )
+
+        self.assertTrue(all(result["supported"] for result in results))
+        self.assertEqual(maximum_active_copies, 1)
+        self.assertEqual(len(manifest_staging_names), 2)
+        self.assertEqual(len(set(manifest_staging_names)), 2)
+        self.assertTrue(all(live_paths_visible_before_publish))
+        for name in manifest_staging_names:
+            transaction_id = name.removesuffix(".stage").rsplit(".", 1)[-1]
+            self.assertEqual(len(transaction_id), 32)
+            self.assertTrue(
+                all(
+                    character in "0123456789abcdef"
+                    for character in transaction_id
+                )
+            )
+        leftovers = [
+            path.name
+            for path in self.installation_folder.iterdir()
+            if path.name.startswith(".")
+            and path.name.endswith((".stage", ".backup", ".obsolete"))
+        ]
+        self.assertEqual(leftovers, [])
+
+    async def test_stop_cancels_inflight_prepare_without_post_stop_state(self):
+        for cycle in range(3):
+            delayed_reader, delayed_writer = await asyncio.open_connection(
+                "127.0.0.1",
+                self.manager.port,
+            )
+            await self.wait_until(
+                lambda: bool(self.manager._inbound_writers)
+            )
+            entered_deploy = threading.Event()
+            release_deploy = threading.Event()
+            real_deploy = self.manager._deploy_bridge_files
+
+            def delayed_deploy(*args, **kwargs):
+                entered_deploy.set()
+                if not release_deploy.wait(2.0):
+                    raise AssertionError("test did not release bridge deployment")
+                return real_deploy(*args, **kwargs)
+
+            with patch.object(
+                self.manager,
+                "_deploy_bridge_files",
+                side_effect=delayed_deploy,
+            ):
+                prepare_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        self.manager.prepare_bridge,
+                        1234,
+                        self.installation,
+                    )
+                )
+                self.assertTrue(
+                    await asyncio.to_thread(entered_deploy.wait, 1.0)
+                )
+                stop_task = asyncio.create_task(self.manager.stop())
+                await self.wait_until(lambda: not self.manager.running)
+                self.assertEqual(
+                    await asyncio.wait_for(
+                        delayed_reader.read(1),
+                        timeout=1.0,
+                    ),
+                    b"",
+                )
+                await self.wait_until(
+                    lambda: not self.manager._inbound_writers
+                    and not self.manager._handler_tasks
+                )
+                self.assertFalse(stop_task.done())
+                release_deploy.set()
+                with self.assertRaisesRegex(
+                    TrainerRuntimeError,
+                    "已停止",
+                ):
+                    await asyncio.wait_for(prepare_task, timeout=2.0)
+                await asyncio.wait_for(stop_task, timeout=2.0)
+
+            self.assertFalse(self.manager.running)
+            self.assertEqual(self.manager._tokens, {})
+            self.assertEqual(self.manager._prepared, {})
+            self.assertEqual(self.manager._installation_owners, {})
+            self.assertEqual(self.manager._owned_installations, {})
+            self.assertEqual(self.manager._inbound_writers, set())
+            self.assertEqual(self.manager._handler_tasks, set())
+            self.assertTrue(
+                (self.installation_folder / "trainerdeck-bridge.json").is_file()
+            )
+            delayed_writer.close()
+            await delayed_writer.wait_closed()
+            with self.assertRaisesRegex(
+                TrainerRuntimeError,
+                "停止",
+            ):
+                self.manager.prepare_bridge(1234, self.installation)
+
+            if cycle < 2:
+                await self.manager.start()
+                self.manager.prepare_bridge(1234, self.installation)
+
+    async def test_accept_registers_writer_before_handler_task_runs(self):
+        reader = asyncio.StreamReader()
+        writer = MagicMock()
+        writer.get_extra_info.return_value = ("127.0.0.1", 54321)
+        writer.wait_closed = AsyncMock()
+
+        self.manager._accept_client(reader, writer)
+
+        self.assertIn(writer, self.manager._inbound_writers)
+        self.assertEqual(len(self.manager._handler_tasks), 1)
+        handler_task = next(iter(self.manager._handler_tasks))
+        self.assertFalse(handler_task.done())
+
+        await asyncio.wait_for(self.manager.stop(), timeout=1.0)
+
+        writer.close.assert_called()
+        writer.wait_closed.assert_awaited()
+        self.assertTrue(handler_task.done())
+        self.assertEqual(self.manager._inbound_writers, set())
+        self.assertEqual(self.manager._handler_tasks, set())
+        self.assertEqual(self.manager._writers, {})
+        self.assertEqual(self.manager._sessions, {})
+
+    async def test_stop_cancels_handler_blocked_in_change_callback(self):
+        callback_entered = asyncio.Event()
+        callback_blocker = asyncio.Event()
+
+        async def blocking_change(_snapshot):
+            callback_entered.set()
+            await callback_blocker.wait()
+
+        self.manager._on_change = blocking_change
+        reader, writer = await self.connect_bridge(
+            session_id="session-blocked-change-1234"
+        )
+        self.assertEqual((await _read_frame(reader))["type"], "hello_ack")
+        await asyncio.wait_for(callback_entered.wait(), timeout=1.0)
+        self.assertIn(1234, self.manager._sessions)
+
+        await asyncio.wait_for(self.manager.stop(), timeout=1.0)
+
+        self.assertFalse(callback_blocker.is_set())
+        self.assertEqual(self.manager._inbound_writers, set())
+        self.assertEqual(self.manager._handler_tasks, set())
+        self.assertEqual(self.manager._writers, {})
+        self.assertEqual(self.manager._sessions, {})
+        self.assertEqual(
+            await asyncio.wait_for(reader.read(1), timeout=1.0),
+            b"",
+        )
+        writer.close()
+        await writer.wait_closed()
+
+    async def test_asset_replace_failure_rolls_back_and_keeps_legacy_bridge(self):
+        old_assets = {}
+        for index, name in enumerate(BRIDGE_ASSET_FILENAMES):
+            destination = self.installation_folder / name
+            old_payload = f"old-asset-{index}".encode("ascii")
+            new_payload = f"new-asset-{index}".encode("ascii")
+            destination.write_bytes(old_payload)
+            (self.assets / name).write_bytes(new_payload)
+            old_assets[name] = old_payload
+        manifest_path = Path(self.prepared["manifest"])
+        old_manifest = manifest_path.read_bytes()
+        legacy_bridge = self.installation_folder / "TrainerDeckBridge.dll"
+        legacy_bridge.write_bytes(b"legacy-bridge")
+        old_token = self.manager._tokens[1234]
+
+        real_replace = os.replace
+        failure_injected = False
+
+        def fail_cecil_publish(source, destination):
+            nonlocal failure_injected
+            source_path = Path(source)
+            destination_path = Path(destination)
+            if (
+                not failure_injected
+                and destination_path.name == "Mono.Cecil.dll"
+                and source_path.name.endswith(".stage")
+            ):
+                failure_injected = True
+                raise PermissionError("simulated locked Cecil destination")
+            return real_replace(source, destination)
+
+        with patch(
+            "trainerdeck_runtime.os.replace",
+            side_effect=fail_cecil_publish,
+        ):
+            with self.assertRaisesRegex(
+                TrainerRuntimeError,
+                "\u65e0\u6cd5\u5b89\u5168\u66f4\u65b0",
+            ):
+                self.manager.prepare_bridge(1234, self.installation)
+
+        self.assertTrue(failure_injected)
+        for name, payload in old_assets.items():
+            self.assertEqual(
+                (self.installation_folder / name).read_bytes(),
+                payload,
+            )
+        self.assertEqual(manifest_path.read_bytes(), old_manifest)
+        self.assertEqual(self.manager._tokens[1234], old_token)
+        self.assertEqual(legacy_bridge.read_bytes(), b"legacy-bridge")
+        leftovers = [
+            path.name
+            for path in self.installation_folder.iterdir()
+            if path.name.startswith(".")
+            and path.name.endswith((".stage", ".backup", ".obsolete"))
+        ]
+        self.assertEqual(leftovers, [])
+
+    async def test_installation_owner_blocks_manifest_overwrite_until_revoke(self):
+        manifest_path = Path(self.prepared["manifest"])
+        original_manifest = manifest_path.read_bytes()
+        same_folder_different_id = {
+            **self.installation,
+            "id": "different-logical-installation",
+        }
+
+        with self.assertRaisesRegex(
+            TrainerRuntimeError,
+            "AppID 1234",
+        ):
+            self.manager.prepare_bridge(5678, same_folder_different_id)
+
+        self.assertEqual(manifest_path.read_bytes(), original_manifest)
+        self.assertNotIn(5678, self.manager._tokens)
+
+        foreign_manifest = {
+            **self.manifest,
+            "app_id": 9999,
+            "token": "f" * 64,
+        }
+        manifest_path.write_text(
+            json.dumps(foreign_manifest, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        await self.manager.revoke_app(1234)
+        self.assertEqual(
+            json.loads(manifest_path.read_text(encoding="utf-8")),
+            foreign_manifest,
+        )
+
+        replacement = self.manager.prepare_bridge(
+            5678,
+            same_folder_different_id,
+        )
+        replacement_manifest = json.loads(
+            Path(replacement["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(replacement_manifest["app_id"], 5678)
+        self.assertNotEqual(
+            replacement_manifest["token"],
+            self.manifest["token"],
+        )
+
     async def test_prepare_failure_is_visible_in_runtime_snapshot(self):
         failure = self.manager.record_prepare_failure(
             1234,
@@ -253,9 +575,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_steam_uint32_app_id_round_trips_without_truncation(self):
         shortcut_app_id = 3908080889
+        shortcut_folder = self.root / "shortcut-trainer"
+        shortcut_folder.mkdir()
+        shortcut_executable = shortcut_folder / "Shortcut Trainer.exe"
+        shortcut_executable.write_bytes(b"MZ" + b"\0" * 64)
+        shortcut_installation = {
+            "id": "installed-shortcut",
+            "folder": str(shortcut_folder),
+            "executable": str(shortcut_executable),
+            "sha256": "b" * 64,
+        }
         prepared = self.manager.prepare_bridge(
             shortcut_app_id,
-            self.installation,
+            shortcut_installation,
         )
         manifest = json.loads(
             Path(prepared["manifest"]).read_text(encoding="utf-8")
@@ -1496,7 +1828,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         new_writer.close()
         await new_writer.wait_closed()
 
-    async def test_revoke_removes_manifest_and_rejects_old_token(self):
+    async def test_revoke_leaves_inert_manifest_and_rejects_old_token(self):
         token = self.manifest["token"]
         session_id = "session-before-revoke"
         reader, writer = await self.connect_bridge(session_id=session_id)
@@ -1510,7 +1842,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.manager.get_snapshot(1234)
         self.assertEqual(snapshot["status"], "not_prepared")
         self.assertFalse(snapshot["connected"])
-        self.assertFalse(Path(self.prepared["manifest"]).exists())
+        self.assertTrue(Path(self.prepared["manifest"]).is_file())
         with self.assertRaises(asyncio.IncompleteReadError):
             await asyncio.wait_for(_read_frame(reader), timeout=1.0)
         writer.close()

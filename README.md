@@ -47,6 +47,7 @@ Bridge 会在运行时准备修改器的缓存副本，不覆盖下载的原始 
 
 不要使用 GitHub 自动生成的“Source code”压缩包代替插件安装包。
 
+
 ## 基本使用
 
 1. 启动目标游戏，再打开 `…` → Decky → TrainerDeck。
@@ -55,6 +56,9 @@ Bridge 会在运行时准备修改器的缓存副本，不覆盖下载的原始 
 4. 首次绑定后退出并重新启动游戏。
 5. 再次打开 TrainerDeck；兼容的修改器会显示“修改器面板”。
 6. 完成操作后按 SteamOS 的正常方式关闭快捷菜单。原修改器窗口仍可通过 Steam 窗口切换打开。
+
+同一份已安装修改器一次只能绑定一个游戏条目；如需改绑，请先对原游戏执行解除绑定，
+避免两个 AppID 共用并覆盖同一份启动 manifest。
 
 设置页面可以修改下载目录，以及选择是否启用：
 
@@ -118,7 +122,11 @@ pnpm run package
 release/TrainerDeck-<version>.zip
 ```
 
-当前版本对应 `release/TrainerDeck-0.6.9.zip`。
+当前版本对应 `release/TrainerDeck-0.7.0.zip`。
+
+`TrainerDeckBridgeLauncher.exe` 内嵌 CLR2 与 CLR4 两份 Bridge payload。运行时会按
+修改器托管 UI 的元数据代际选择完全匹配的一份，并只在专用缓存目录写出规范名
+`TrainerDeckBridge.dll`。安装包不单独发布任何 `TrainerDeckBridge*.dll` payload。
 
 安装包的主要结构如下：
 
@@ -131,7 +139,6 @@ TrainerDeck/
 │   └── trainerdeck_runtime.py
 ├── bin/bridge/
 │   ├── TrainerDeckBridgeLauncher.exe
-│   ├── TrainerDeckBridge.dll
 │   └── Mono.Cecil.dll
 ├── package.json
 ├── plugin.json

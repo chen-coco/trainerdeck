@@ -22,7 +22,10 @@ if [[ "$artifacts" != "$repository_root/bin/bridge" ]]; then
 fi
 rm -rf -- "$artifacts"
 mkdir -p "$artifacts"
-cp "$bridge_root/TrainerDeckBridge/bin/$configuration/net35/TrainerDeckBridge.dll" "$artifacts/"
+cp "$bridge_root/TrainerDeckBridge/bin/$configuration/net35/TrainerDeckBridge.dll" \
+  "$artifacts/TrainerDeckBridge.Clr2.dll"
+cp "$bridge_root/TrainerDeckBridge/bin/$configuration/net40/TrainerDeckBridge.dll" \
+  "$artifacts/TrainerDeckBridge.Clr4.dll"
 cp "$bridge_root/TrainerDeckBridgeLauncher/bin/$configuration/net462/TrainerDeckBridgeLauncher.exe" "$artifacts/"
 cp "$bridge_root/TrainerDeckBridgeLauncher/bin/$configuration/net462/Mono.Cecil.dll" "$artifacts/"
 cp "$bridge_root/trainerdeck-bridge.example.json" "$artifacts/"

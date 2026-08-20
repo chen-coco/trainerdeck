@@ -40,10 +40,16 @@ if (Test-Path -LiteralPath $resolvedArtifacts) {
 }
 New-Item -ItemType Directory -Path $resolvedArtifacts -Force | Out-Null
 
-$bridgeOutput = Join-Path $bridgeRoot "TrainerDeckBridge\bin\$Configuration\net35"
+$bridgeClr2Output = Join-Path $bridgeRoot "TrainerDeckBridge\bin\$Configuration\net35"
+$bridgeClr4Output = Join-Path $bridgeRoot "TrainerDeckBridge\bin\$Configuration\net40"
 $launcherOutput = Join-Path $bridgeRoot "TrainerDeckBridgeLauncher\bin\$Configuration\net462"
 
-Copy-Item (Join-Path $bridgeOutput "TrainerDeckBridge.dll") $resolvedArtifacts
+Copy-Item `
+    (Join-Path $bridgeClr2Output "TrainerDeckBridge.dll") `
+    (Join-Path $resolvedArtifacts "TrainerDeckBridge.Clr2.dll")
+Copy-Item `
+    (Join-Path $bridgeClr4Output "TrainerDeckBridge.dll") `
+    (Join-Path $resolvedArtifacts "TrainerDeckBridge.Clr4.dll")
 Copy-Item (Join-Path $launcherOutput "TrainerDeckBridgeLauncher.exe") $resolvedArtifacts
 Copy-Item (Join-Path $launcherOutput "Mono.Cecil.dll") $resolvedArtifacts
 Copy-Item (Join-Path $bridgeRoot "trainerdeck-bridge.example.json") $resolvedArtifacts

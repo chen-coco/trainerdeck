@@ -25,7 +25,8 @@ if ($LASTEXITCODE -ne 0) {
 $cecil = Join-Path $repository "bin\bridge\Mono.Cecil.dll"
 Add-Type -Path $cecil
 $artifacts = @(
-    "TrainerDeckBridge.dll",
+    "TrainerDeckBridge.Clr2.dll",
+    "TrainerDeckBridge.Clr4.dll",
     "TrainerDeckBridgeLauncher.exe"
 )
 foreach ($artifact in $artifacts) {

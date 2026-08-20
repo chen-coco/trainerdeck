@@ -1,21 +1,24 @@
 # TrainerDeck FLiNG unified managed bridge
 
-This directory contains the Bridge 0.6.7 implementation bundled with TrainerDeck v0.6.8
+This directory contains the Bridge 0.7.0 implementation bundled with TrainerDeck v0.7.0
 for FLiNG's managed WPF and WinForms trainers. It does not send keyboard
 input and it preserves CheatDeck's hotkey and original-window workflows.
 
-The bridge has two executables:
+The release has one external Bridge host:
 
-- `TrainerDeckBridge.dll` is the single canonical bridge. It targets
-  CLR2/net35 and is loaded into the trainer's existing CLR AppDomain; there is
-  no second bridge binary, CLR selector, or canonical republishing step. A
-  fixed metadata check rejects a target UI from another CLR generation.
-  It combines the core's menu payload with a thin WPF or WinForms control
-  adapter, then calls FLiNG's own `ExecuteTrainerCommand` or `ToggleCheat`
-  delegate on the UI's native dispatch context.
 - `TrainerDeckBridgeLauncher.exe` prepares a hidden cached copy of the trainer,
   patches only its encrypted `UI/101` managed resource, optionally starts that
-  copy, and waits for it. The downloaded original trainer is never overwritten.
+  copy, and waits for it. The Host embeds a CLR2/net35 and a CLR4/net40 Bridge
+  payload with the same `TrainerDeckBridge` assembly identity. It requires the
+  target UI's metadata runtime and sole `mscorlib` reference to agree, selects
+  the exactly matching payload, and publishes that payload to the dedicated
+  cache as `TrainerDeckBridge.dll`. Unknown or mixed generations fail closed.
+  Neither payload is a standalone release file, and the downloaded original
+  trainer is never overwritten.
+
+The selected in-process Bridge combines the core's menu payload with a thin WPF
+or WinForms control adapter, then calls FLiNG's own `ExecuteTrainerCommand` or
+`ToggleCheat` delegate on the UI's native dispatch context.
 
 This is a compatibility prototype, not an anti-cheat bypass. Do not use a
 trainer in an online or anti-cheat-protected game.
@@ -137,7 +140,7 @@ revision. The transport is deliberately plain TCP because it is restricted to
 Bridge to backend:
 
 ```json
-{"type":"hello","protocol":1,"token":"...","app_id":2072450,"session_id":"0123456789abcdef0123456789abcdef","trainer_sha256":"...","ui_fingerprint":"...","bridge_version":"0.6.7","capabilities":["toggle_command_v1","action_command_v1","value_snapshot_v1","value_command_v1","value_command_receipt_v1","trainer_window_visible_v1","auto_return_confirmation_v1","localized_widget_fallback_v1","nonblocking_ui_commands_v1","independent_heartbeat_v1"]}
+{"type":"hello","protocol":1,"token":"...","app_id":2072450,"session_id":"0123456789abcdef0123456789abcdef","trainer_sha256":"...","ui_fingerprint":"...","bridge_version":"0.7.0","capabilities":["toggle_command_v1","action_command_v1","value_snapshot_v1","value_command_v1","value_command_receipt_v1","trainer_window_visible_v1","auto_return_confirmation_v1","localized_widget_fallback_v1","nonblocking_ui_commands_v1","independent_heartbeat_v1"]}
 {"type":"snapshot","token":"...","session_id":"0123456789abcdef0123456789abcdef","revision":1,"game_available":true,"options":[{"id":"N1","kind":"toggle_with_input_adjustment","labels":{"zh_cn":"游戏速度","zh_tw":"遊戲速度","en":"Game Speed"},"tooltips":{},"group":{},"tooltip_style":"normal","active":false,"controllable":true,"value":"1.0","value_controllable":true,"value_type":"number","value_apply_mode":"stage_then_toggle","minimum":0.5,"maximum":10.0,"step":0.5}]}
 {"type":"command_accepted","token":"...","session_id":"0123456789abcdef0123456789abcdef","request_id":"42","status":"queued"}
 {"type":"command_accepted","token":"...","session_id":"0123456789abcdef0123456789abcdef","request_id":"43","status":"staged","operation":"value","value":"1.5","invoked":false}
@@ -158,11 +161,13 @@ Backend to bridge:
 ## Manifest
 
 Copy `trainerdeck-bridge.example.json` to
-`trainerdeck-bridge.json` beside the launcher and bridge DLL. Generate a new,
+`trainerdeck-bridge.json` beside the launcher. Generate a new,
 unpredictable token whenever a trainer binding is prepared. The running bridge
-reloads the adjacent manifest before reconnecting, so a Decky backend restart
-can rotate its port and token without restarting the game. The launcher rejects
-any host other than the literal `127.0.0.1`.
+reloads the live manifest selected at startup before reconnecting. A normal Host
+launch passes the outer manifest path to the prepared child; a manually started
+cached copy falls back to its adjacent snapshot. A Decky backend restart can
+therefore rotate its port and token without restarting the game. The launcher
+rejects any host other than the literal `127.0.0.1`.
 
 Under Proton, a Linux trainer path is normally visible to the launcher through
 Wine's `Z:` drive, for example:
@@ -174,11 +179,19 @@ Wine's `Z:` drive, for example:
 `cacheDirectory` may be empty. The default is:
 
 ```text
-%LOCALAPPDATA%\TrainerDeck\BridgeCache\<trainer-sha256-prefix>\
+%LOCALAPPDATA%\TrainerDeck\BridgeCache\<trainer-hash>-a<AppID>-s<session-token-hash>\
 ```
 
-The launcher marks the cache directory and its runtime files hidden where the
-Wine-backed filesystem supports the Windows hidden attribute.
+Each directory is an immutable launch generation. The patched EXE, selected
+canonical `TrainerDeckBridge.dll`, and the exact manifest loaded for that
+session are first written to unique staging files and then published atomically.
+This prevents concurrent launches or a backend token rotation from combining
+files from different sessions. For a normal launch, the Host also passes the
+path of the atomically replaced outer manifest to the prepared child. Reconnects
+therefore follow a new backend port/token without rewriting the immutable cache
+snapshot or restarting the trainer. The launcher marks the cache directory and
+its runtime files hidden where the Wine-backed filesystem supports the Windows
+hidden attribute.
 
 ## Preparing and launching
 
@@ -212,29 +225,34 @@ Preparation performs these steps:
 3. derive the 32-byte repeating XOR key using the standard first 32 bytes of a
    managed MZ header as known plaintext;
 4. decrypt the embedded UI and validate the `MZ` signature;
-5. use Mono.Cecil to route every return from
+5. inspect the UI metadata runtime and its single `mscorlib` reference, then
+   extract the exactly matching CLR2 or CLR4 Bridge payload from the Host;
+6. use Mono.Cecil to route every return from
    `TrainerCall_SetFunctionPointers` through
    `TrainerDeckBridge.EntryPoint.Start(this)`;
-6. in `TrainerCall_SetOptionList`, capture the two direct string payloads before
+7. in `TrainerCall_SetOptionList`, capture the two direct string payloads before
    `SetupCheatOptions(string,string)` and call
    `ReportMenuPayload(this, zhCn, en)` without consuming the original stack;
-7. in `TrainerCall_SetCheatOptionState`, capture its unique
+8. in `TrainerCall_SetCheatOptionState`, capture its unique
    `ReadString`/`ReadInt32` protocol values and call
    `ReportOptionState(this, id, rawState == 1)` while preserving the original
    state-update stack;
-8. re-encrypt the patched UI with the same key;
-9. update `UI/101` in the staging copy and publish the cached copy.
+9. re-encrypt the patched UI with the same key;
+10. update `UI/101` in the staging copy and atomically publish the cached copy,
+    selected payload under the canonical cache name, and the loaded manifest
+    into the same immutable session generation.
 
 Unsupported resource formats or UI assemblies fail closed. The launcher does
 not fall back to keyboard input.
 
-The current single-bridge path has a production `--prepare-only` regression.
-This is not dynamic Proton validation.
+The embedded Host path has synthetic `--prepare-only` regressions for both CLR2
+and CLR4 UIs without using a downloaded trainer sample. This is not dynamic
+Proton validation.
 
 ## Building
 
-Install a current .NET SDK. The bridge targets .NET Framework 3.5, while the
-launcher targets .NET Framework 4.6.2. The bridge and launcher
+Install a current .NET SDK. The two Bridge payloads target .NET Framework 3.5
+and 4.0, while the launcher targets .NET Framework 4.6.2. The bridge and launcher
 use the shared dependency-free JSON codec instead of `System.Web.Extensions`,
 and reference-assembly packages allow all targets to be cross-compiled on Linux:
 
@@ -252,12 +270,18 @@ The launcher uses the `Mono.Cecil` PackageReference. Output is collected under
 the repository's `bin/bridge/` directory with:
 
 ```text
-TrainerDeckBridge.dll
+TrainerDeckBridge.Clr2.dll
+TrainerDeckBridge.Clr4.dll
 TrainerDeckBridgeLauncher.exe
 Mono.Cecil.dll
 trainerdeck-bridge.example.json
 THIRD_PARTY_NOTICES.txt
 ```
+
+The two payload DLLs are build-only inspection artifacts. They are embedded
+into the Host and deliberately omitted from the plugin ZIP. Only
+`TrainerDeckBridgeLauncher.exe` and `Mono.Cecil.dll` are external runtime
+binaries in a release package.
 
 Building and static preparation do not execute a trainer sample. Dynamic
 validation should be done only in a disposable Windows VM or a dedicated

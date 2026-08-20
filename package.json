@@ -1,6 +1,6 @@
 {
   "name": "trainerdeck",
-  "version": "0.6.9",
+  "version": "0.7.0",
   "description": "A Decky plugin for finding, installing, binding, and directly synchronizing supported standalone FLiNG trainers.",
   "private": true,
   "homepage": "https://github.com/chen-coco/trainerdeck#readme",
