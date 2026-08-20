@@ -6,11 +6,61 @@ using Mono.Cecil.Cil;
 
 namespace TrainerDeckBridgeLauncher
 {
+    internal enum BridgeRuntime
+    {
+        Clr2,
+        Clr4
+    }
+
+    internal sealed class ManagedRuntimeInfo
+    {
+        public BridgeRuntime Runtime { get; set; }
+
+        public string RuntimeVersion { get; set; }
+
+        public int MscorlibMajor { get; set; }
+
+        public string RuntimeLabel
+        {
+            get
+            {
+                return Runtime == BridgeRuntime.Clr2 ? "clr2" : "clr4";
+            }
+        }
+    }
+
     internal static class UiAssemblyPatcher
     {
+        private const string BridgeAssemblySimpleName =
+            "TrainerDeckBridge";
+
+        public static ManagedRuntimeInfo InspectRuntime(
+            byte[] assemblyData,
+            string description)
+        {
+            if (assemblyData == null || assemblyData.Length < 2)
+            {
+                throw new ArgumentException(
+                    description + " assembly is empty.",
+                    "assemblyData");
+            }
+
+            using (MemoryStream input = new MemoryStream(
+                assemblyData,
+                false))
+            using (AssemblyDefinition assembly =
+                AssemblyDefinition.ReadAssembly(
+                    input,
+                    new ReaderParameters { InMemory = true }))
+            {
+                return InspectRuntime(assembly.MainModule, description);
+            }
+        }
+
         public static byte[] InjectBridgeStart(
             byte[] uiAssembly,
-            string bridgeAssemblyPath)
+            byte[] bridgeAssemblyData,
+            BridgeRuntime expectedRuntime)
         {
             if (uiAssembly == null || uiAssembly.Length < 2)
             {
@@ -19,78 +69,122 @@ namespace TrainerDeckBridgeLauncher
                     "uiAssembly");
             }
 
-            if (!File.Exists(bridgeAssemblyPath))
+            if (bridgeAssemblyData == null || bridgeAssemblyData.Length < 2)
             {
-                throw new FileNotFoundException(
-                    "TrainerDeckBridge.dll is missing.",
-                    bridgeAssemblyPath);
+                throw new ArgumentException(
+                    "TrainerDeck bridge payload is empty.",
+                    "bridgeAssemblyData");
             }
 
             using (MemoryStream input = new MemoryStream(
                 uiAssembly,
+                false))
+            using (MemoryStream bridgeInput = new MemoryStream(
+                bridgeAssemblyData,
                 false))
             using (AssemblyDefinition targetAssembly =
                 AssemblyDefinition.ReadAssembly(
                     input,
                     new ReaderParameters { InMemory = true }))
             using (AssemblyDefinition bridgeAssembly =
-                AssemblyDefinition.ReadAssembly(bridgeAssemblyPath))
+                AssemblyDefinition.ReadAssembly(
+                    bridgeInput,
+                    new ReaderParameters { InMemory = true }))
             {
+                EnsureBridgeAssemblyIdentity(bridgeAssembly);
                 ModuleDefinition targetModule = targetAssembly.MainModule;
-                EnsureCurrentRuntime(targetModule, "Trainer UI");
-                EnsureCurrentRuntime(
+                ManagedRuntimeInfo targetRuntime = InspectRuntime(
+                    targetModule,
+                    "Trainer UI");
+                EnsureExpectedRuntime(
+                    targetRuntime,
+                    expectedRuntime,
+                    "Trainer UI");
+                ManagedRuntimeInfo bridgeRuntime = InspectRuntime(
                     bridgeAssembly.MainModule,
-                    "TrainerDeck bridge");
-                MethodDefinition bridgeStart = FindBridgeStart(
-                    bridgeAssembly.MainModule);
-                MethodReference importedStart = targetModule.ImportReference(
-                    bridgeStart);
-                MethodDefinition bridgeStateReport = FindBridgeStateReport(
-                    bridgeAssembly.MainModule);
-                MethodReference importedStateReport =
-                    targetModule.ImportReference(bridgeStateReport);
-                MethodDefinition bridgeMenuPayloadReport =
-                    FindBridgeMenuPayloadReport(
-                        bridgeAssembly.MainModule);
-                MethodReference importedMenuPayloadReport =
-                    targetModule.ImportReference(
-                        bridgeMenuPayloadReport);
+                    "TrainerDeck bridge payload");
+                EnsureExpectedRuntime(
+                    bridgeRuntime,
+                    expectedRuntime,
+                    "TrainerDeck bridge payload");
+
+                // Validate the embedded payload surface, but do not import its
+                // MethodDefinitions. Importing them would also import their
+                // CLR-specific core-library TypeReferences into the UI module.
+                FindBridgeStart(bridgeAssembly.MainModule);
+                FindBridgeStateReport(bridgeAssembly.MainModule);
+                FindBridgeMenuPayloadReport(bridgeAssembly.MainModule);
+
+                AssemblyNameReference bridgeReference =
+                    GetOrAddBridgeAssemblyReference(
+                        targetModule,
+                        bridgeAssembly);
+                TypeReference bridgeEntryPoint = new TypeReference(
+                    "TrainerDeckBridge",
+                    "EntryPoint",
+                    targetModule,
+                    bridgeReference);
+                MethodReference bridgeStart = CreateBridgeMethodReference(
+                    targetModule,
+                    bridgeEntryPoint,
+                    "Start",
+                    targetModule.TypeSystem.Object);
+                MethodReference bridgeStateReport =
+                    CreateBridgeMethodReference(
+                        targetModule,
+                        bridgeEntryPoint,
+                        "ReportOptionState",
+                        targetModule.TypeSystem.Object,
+                        targetModule.TypeSystem.String,
+                        targetModule.TypeSystem.Boolean);
+                MethodReference bridgeMenuPayloadReport =
+                    CreateBridgeMethodReference(
+                        targetModule,
+                        bridgeEntryPoint,
+                        "ReportMenuPayload",
+                        targetModule.TypeSystem.Object,
+                        targetModule.TypeSystem.String,
+                        targetModule.TypeSystem.String);
                 MethodDefinition targetMethod = FindTrainerHook(targetModule);
                 MethodDefinition stateTarget = FindTrainerStateHook(
                     targetModule);
                 MethodDefinition menuTarget = FindTrainerMenuHook(
                     targetModule);
 
-                if (!ContainsCall(targetMethod, importedStart))
+                if (!ContainsCall(targetMethod, bridgeStart))
                 {
-                    AddExitTrampoline(targetMethod, importedStart);
+                    AddExitTrampoline(targetMethod, bridgeStart);
                 }
-                if (!ContainsCall(stateTarget, importedStateReport))
+                if (!ContainsCall(stateTarget, bridgeStateReport))
                 {
                     AddStateCallbacks(
                         stateTarget,
-                        importedStateReport);
+                        bridgeStateReport);
                 }
                 if (!ContainsCall(
                         menuTarget,
-                        importedMenuPayloadReport))
+                        bridgeMenuPayloadReport))
                 {
                     AddMenuPayloadCallback(
                         menuTarget,
-                        importedMenuPayloadReport);
+                        bridgeMenuPayloadReport);
                 }
 
                 using (MemoryStream output = new MemoryStream())
                 {
                     targetAssembly.Write(output);
                     byte[] patchedAssembly = output.ToArray();
-                    EnsurePatchedAssembly(patchedAssembly);
+                    EnsurePatchedAssembly(
+                        patchedAssembly,
+                        expectedRuntime);
                     return patchedAssembly;
                 }
             }
         }
 
-        private static void EnsurePatchedAssembly(byte[] patchedAssembly)
+        private static void EnsurePatchedAssembly(
+            byte[] patchedAssembly,
+            BridgeRuntime expectedRuntime)
         {
             using (MemoryStream input = new MemoryStream(
                 patchedAssembly,
@@ -100,13 +194,17 @@ namespace TrainerDeckBridgeLauncher
                     input,
                     new ReaderParameters { InMemory = true }))
             {
-                EnsureCurrentRuntime(
+                ManagedRuntimeInfo runtime = InspectRuntime(
                     assembly.MainModule,
+                    "Patched trainer UI");
+                EnsureExpectedRuntime(
+                    runtime,
+                    expectedRuntime,
                     "Patched trainer UI");
             }
         }
 
-        private static void EnsureCurrentRuntime(
+        private static ManagedRuntimeInfo InspectRuntime(
             ModuleDefinition module,
             string description)
         {
@@ -116,6 +214,7 @@ namespace TrainerDeckBridgeLauncher
             }
 
             int coreLibraryReferences = 0;
+            int mscorlibMajor = 0;
             for (int index = 0;
                 index < module.AssemblyReferences.Count;
                 index++)
@@ -131,37 +230,181 @@ namespace TrainerDeckBridgeLauncher
                 }
 
                 coreLibraryReferences++;
-                int major = reference.Version == null
+                mscorlibMajor = reference.Version == null
                     ? 0
                     : reference.Version.Major;
-                if (major != 2)
-                {
-                    throw new InvalidDataException(
-                        description
-                        + " must reference the current CLR2 mscorlib, not "
-                        + (reference.Version == null
-                            ? "<missing>"
-                            : reference.Version.ToString())
-                        + ".");
-                }
             }
 
             if (coreLibraryReferences != 1)
             {
                 throw new InvalidDataException(
                     description
-                    + " must contain exactly one CLR2 mscorlib reference.");
+                    + " must contain exactly one mscorlib reference; found "
+                    + coreLibraryReferences
+                    + ". Unknown or mixed runtimes are not supported.");
             }
 
             string runtimeVersion = module.RuntimeVersion ?? string.Empty;
-            if (!runtimeVersion.StartsWith(
+            BridgeRuntime metadataRuntime;
+            if (runtimeVersion.StartsWith(
                     "v2.",
                     StringComparison.OrdinalIgnoreCase))
             {
+                metadataRuntime = BridgeRuntime.Clr2;
+            }
+            else if (runtimeVersion.StartsWith(
+                    "v4.",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                metadataRuntime = BridgeRuntime.Clr4;
+            }
+            else
+            {
                 throw new InvalidDataException(
                     description
-                    + " must use the current CLR2 metadata runtime.");
+                    + " has unsupported metadata runtime \""
+                    + runtimeVersion
+                    + "\". Only CLR2 and CLR4 are supported.");
             }
+
+            BridgeRuntime coreLibraryRuntime;
+            if (mscorlibMajor == 2)
+            {
+                coreLibraryRuntime = BridgeRuntime.Clr2;
+            }
+            else if (mscorlibMajor == 4)
+            {
+                coreLibraryRuntime = BridgeRuntime.Clr4;
+            }
+            else
+            {
+                throw new InvalidDataException(
+                    description
+                    + " has unsupported mscorlib major version "
+                    + mscorlibMajor
+                    + ". Only versions 2 and 4 are supported.");
+            }
+
+            if (metadataRuntime != coreLibraryRuntime)
+            {
+                throw new InvalidDataException(
+                    description
+                    + " has mixed runtime metadata: RuntimeVersion=\""
+                    + runtimeVersion
+                    + "\", mscorlib_major="
+                    + mscorlibMajor
+                    + ".");
+            }
+
+            return new ManagedRuntimeInfo
+            {
+                Runtime = metadataRuntime,
+                RuntimeVersion = runtimeVersion,
+                MscorlibMajor = mscorlibMajor
+            };
+        }
+
+        private static void EnsureExpectedRuntime(
+            ManagedRuntimeInfo actual,
+            BridgeRuntime expected,
+            string description)
+        {
+            if (actual.Runtime != expected)
+            {
+                throw new InvalidDataException(
+                    description
+                    + " runtime "
+                    + actual.RuntimeLabel
+                    + " does not match selected payload runtime "
+                    + (expected == BridgeRuntime.Clr2 ? "clr2" : "clr4")
+                    + ".");
+            }
+        }
+
+        private static AssemblyNameReference GetOrAddBridgeAssemblyReference(
+            ModuleDefinition targetModule,
+            AssemblyDefinition bridgeAssembly)
+        {
+            string bridgeName = bridgeAssembly.Name.Name;
+            string bridgeIdentity = bridgeAssembly.Name.FullName;
+            for (int index = 0;
+                index < targetModule.AssemblyReferences.Count;
+                index++)
+            {
+                AssemblyNameReference existing =
+                    targetModule.AssemblyReferences[index];
+                if (!string.Equals(
+                        existing.Name,
+                        bridgeName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!string.Equals(
+                        existing.FullName,
+                        bridgeIdentity,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "Trainer UI already references an incompatible "
+                        + bridgeName
+                        + " assembly: "
+                        + existing.FullName
+                        + ".");
+                }
+
+                return existing;
+            }
+
+            AssemblyNameReference added = AssemblyNameReference.Parse(
+                bridgeIdentity);
+            targetModule.AssemblyReferences.Add(added);
+            return added;
+        }
+
+        private static void EnsureBridgeAssemblyIdentity(
+            AssemblyDefinition bridgeAssembly)
+        {
+            string simpleName = bridgeAssembly == null
+                || bridgeAssembly.Name == null
+                ? string.Empty
+                : bridgeAssembly.Name.Name;
+            if (!string.Equals(
+                    simpleName,
+                    BridgeAssemblySimpleName,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "Embedded bridge payload must have assembly name "
+                    + BridgeAssemblySimpleName
+                    + ", not "
+                    + (string.IsNullOrEmpty(simpleName)
+                        ? "<missing>"
+                        : simpleName)
+                    + ".");
+            }
+        }
+
+        private static MethodReference CreateBridgeMethodReference(
+            ModuleDefinition targetModule,
+            TypeReference bridgeEntryPoint,
+            string methodName,
+            params TypeReference[] parameterTypes)
+        {
+            MethodReference method = new MethodReference(
+                methodName,
+                targetModule.TypeSystem.Void,
+                bridgeEntryPoint);
+            method.HasThis = false;
+            method.ExplicitThis = false;
+            for (int index = 0; index < parameterTypes.Length; index++)
+            {
+                method.Parameters.Add(
+                    new ParameterDefinition(parameterTypes[index]));
+            }
+
+            return method;
         }
 
         private static MethodDefinition FindBridgeStart(ModuleDefinition module)

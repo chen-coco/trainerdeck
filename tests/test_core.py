@@ -365,6 +365,19 @@ class ArchiveTests(CoreTestCase):
             self.core.list_bindings()[1234]["id"],
             installed["id"],
         )
+        with self.assertRaisesRegex(
+            TrainerDeckError,
+            "AppID 1234",
+        ):
+            self.core.bind_trainer(
+                5678,
+                installed["id"],
+                installed["executable"],
+                "%command%",
+                "PROTON_REMOTE_DEBUG_CMD=\"'/trainer.exe'\" %command%",
+                "Another Game",
+            )
+        self.assertIsNone(self.core.get_binding(5678))
         updated_original = f"{original_launch_options} --user-added"
         updated_applied = (
             "PROTON_REMOTE_DEBUG_CMD=\"'/trainer.exe'\" "
@@ -395,6 +408,17 @@ class ArchiveTests(CoreTestCase):
         recovery_record = self.core.list_binding_records()[0]
         self.assertFalse(recovery_record["active"])
         self.assertTrue(recovery_record["launch_options_restored"])
+
+        released_binding = self.core.bind_trainer(
+            5678,
+            installed["id"],
+            installed["executable"],
+            "%command%",
+            "PROTON_REMOTE_DEBUG_CMD=\"'/trainer.exe'\" %command%",
+            "Another Game",
+        )
+        self.assertEqual(released_binding["app_id"], 5678)
+        self.assertTrue(self.core.unbind_trainer(5678, True))
 
         bridge_launcher = (
             Path(installed["folder"]) / "TrainerDeckBridgeLauncher.exe"
@@ -496,6 +520,53 @@ class ArchiveTests(CoreTestCase):
                 target_type="steam",
                 launch_options_field="shortcut",
             )
+
+    def test_binding_rejects_different_ids_for_same_physical_folder(self):
+        folder = self.home / "Downloads" / "trainer" / "shared"
+        folder.mkdir(parents=True)
+        executable = folder / "Shared Trainer.exe"
+        executable.write_bytes(b"MZ" + b"\0" * 64)
+        installations = {
+            installation_id: {
+                "id": installation_id,
+                "title": f"Trainer {installation_id}",
+                "folder": str(folder),
+                "executable": str(executable),
+                "sha256": "a" * 64,
+            }
+            for installation_id in ("logical-a", "logical-b")
+        }
+
+        def get_installation(installation_id):
+            try:
+                return installations[str(installation_id)]
+            except KeyError as error:
+                raise TrainerDeckError("找不到已安装修改器") from error
+
+        with patch.object(
+            self.core,
+            "get_installation",
+            side_effect=get_installation,
+        ):
+            self.core.bind_trainer(1234, "logical-a", str(executable))
+            stored = json.loads(
+                self.core.bindings_path.read_text(encoding="utf-8")
+            )["1234"]
+            self.assertEqual(
+                Path(stored["installation_folder"]),
+                folder.resolve(),
+            )
+            with self.assertRaisesRegex(TrainerDeckError, "AppID 1234"):
+                self.core.bind_trainer(5678, "logical-b", str(executable))
+            self.assertIsNone(self.core.get_binding(5678))
+
+            self.assertTrue(self.core.unbind_trainer(1234, True))
+            rebound = self.core.bind_trainer(
+                5678,
+                "logical-b",
+                str(executable),
+            )
+            self.assertEqual(rebound["app_id"], 5678)
 
     def test_trainer_root_is_scoped(self):
         outside = self.root.parent / "not-allowed"

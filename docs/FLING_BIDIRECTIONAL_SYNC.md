@@ -10,6 +10,7 @@ v0.6.2 显式返回游戏与输入焦点恢复更新：2026-08-04
 v0.6.4 Sifu 菜单解析与 Decky 手柄提示更新：2026-08-06
 v0.6.7 独立心跳与非阻塞 UI 命令更新：2026-08-07
 v0.6.8 SteamOS 整屏焦点过渡更新：2026-08-07
+v0.7.0 Host 内嵌 CLR2/CLR4 Bridge 更新：2026-08-20
 
 ## 结论
 
@@ -51,9 +52,14 @@ delegate 同步返回后以 `applied` 完成，拒绝、超时或断连都会保
 
 实现完成不等于 Proton 兼容性已经验收。v0.5.0 的 Sifu 实机记录已经暴露并定位一次
 启动失败：补丁进程退出码为 0、生命周期约 10.29 秒，但 `bridge_ready=false`；5 秒
-短退出限制错误地禁止启动原 EXE。v0.5.1 修正这一回退条件；v0.6.1 只删除 CLR 双
-Bridge 选择并固定使用单一 `net35` Bridge。临时资源更新、WPF/WinForms 调度、
-loopback、数值实际生效和 Gamescope 输入路由仍需在
+短退出限制错误地禁止启动原 EXE。v0.5.1 修正这一回退条件；v0.6.1 曾固定使用单一
+`net35` Bridge。v0.7.0 改为由单一外部 Host 内嵌 CLR2/net35 与 CLR4/net40 payload，
+同时核对目标 UI 的 metadata runtime 和 `mscorlib` 主版本后选择完全匹配的一份；两种
+payload 都不会作为外部插件文件发布。缓存按修改器哈希、AppID 与会话 token 哈希隔离，
+补丁 EXE、所选 payload 和已读取 manifest 作为不可变代际原子发布。临时资源更新、
+Host 同时把外层原子 manifest 路径交给已准备子进程，使运行中的 Bridge 可在后端重启后
+读取新端口与 token，不需要重写该缓存代际。WPF/WinForms 调度、loopback、
+数值实际生效和 Gamescope 输入路由仍需在
 Steam Deck 上继续验证。2020 年以前的版本、纯 native UI 与未知协议也不在当前结论内。
 
 ## 样本与安全边界
@@ -309,8 +315,10 @@ launcher 会在启动前记录 ready 日志的基线，只接受本次启动后�
 `Bridge started.`。v0.5.1 等待完整启动观察窗；若窗口结束时补丁进程已经退出且仍没有
 新鲜 ready，就启动未修改的原修改器，不再使用 5 秒生命周期阈值判断是否允许
 fail-open。补丁进程仍存活、已确认 ready，或启动后的监控状态不明确时继续禁止第二实例。
-后端升级刷新旧绑定时仍覆盖同一 Launcher 路径；资源复制或 manifest 写入异常会记录为
-对应应用的 `error` 快照，供 Decky 面板直接显示。
+后端升级刷新旧绑定时仍覆盖同一 Launcher 路径，但会在串行事务中先完成唯一 staging，
+再分别原子替换 Host、Cecil 与 manifest；失败时恢复旧文件，整组成功后才移除旧外置
+Bridge。一个物理安装不会同时向两个 AppID 发布 manifest；重复绑定会在改写文件前停止。
+资源复制或 manifest 写入异常会记录为对应应用的 `error` 快照，供 Decky 面板直接显示。
 
 UI Automation 可用于快速探索标准 WPF `ToggleButton`、`TextBox` 和 `Slider`
 是否暴露状态，但在 Wine/Proton、隐藏窗口和 Gaming Mode 下兼容性不足，只作为

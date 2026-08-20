@@ -11,6 +11,12 @@ class BridgeLauncherResilienceTests(unittest.TestCase):
             / "TrainerDeckBridgeLauncher"
             / "Program.cs"
         ).read_text(encoding="utf-8")
+        self.entry_point = (
+            repository
+            / "bridge"
+            / "TrainerDeckBridge"
+            / "EntryPoint.cs"
+        ).read_text(encoding="utf-8")
 
     def test_any_observed_startup_exit_without_ready_fails_open(self):
         self.assertIn("return processExited && !bridgeReady;", self.source)
@@ -71,6 +77,16 @@ class BridgeLauncherResilienceTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.source)
+
+    def test_prepared_child_reloads_the_atomically_replaced_live_manifest(self):
+        variable = "TRAINERDECK_BRIDGE_MANIFEST"
+        self.assertIn(variable, self.source)
+        self.assertIn("startInfo.EnvironmentVariables[", self.source)
+        self.assertIn("forwarded,\n                        manifestPath", self.source)
+        self.assertIn(variable, self.entry_point)
+        self.assertIn("ResolveManifestPath()", self.entry_point)
+        self.assertIn("Path.GetFullPath(livePath)", self.entry_point)
+        self.assertIn("ManifestName", self.entry_point)
 
 
 if __name__ == "__main__":

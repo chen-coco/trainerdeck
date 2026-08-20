@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-PLUGIN_VERSION = "0.6.9"
+PLUGIN_VERSION = "0.7.0"
 SCHEMA_VERSION = 3
 SETTINGS_FILENAME = "settings.json"
 BINDINGS_FILENAME = "bindings.json"
@@ -1163,6 +1163,56 @@ class TrainerDeckCore:
             raise TrainerDeckError("绑定的修改器启动路径无效")
         bindings = self._bindings()
         key = str(numeric_app_id)
+        wanted_installation_id = str(installation["id"])
+        wanted_folder_key = os.path.normcase(
+            os.path.normpath(str(folder.resolve()))
+        )
+        for raw_app_id, raw_binding in bindings.items():
+            if raw_app_id == key or not isinstance(raw_binding, dict):
+                continue
+            if raw_binding.get("active", True) is False:
+                continue
+            bound_installation_id = str(
+                raw_binding.get("installation_id")
+                or raw_binding.get("id")
+                or ""
+            )
+            bound_folder_value = str(
+                raw_binding.get("installation_folder") or ""
+            ).strip()
+            if not bound_folder_value and bound_installation_id:
+                try:
+                    bound_installation = self.get_installation(
+                        bound_installation_id
+                    )
+                except TrainerDeckError:
+                    bound_installation = None
+                if bound_installation is not None:
+                    bound_folder_value = str(
+                        bound_installation.get("folder") or ""
+                    )
+            bound_folder_key = (
+                os.path.normcase(
+                    os.path.normpath(
+                        str(Path(bound_folder_value).resolve())
+                    )
+                )
+                if bound_folder_value
+                else ""
+            )
+            if (
+                bound_installation_id != wanted_installation_id
+                and bound_folder_key != wanted_folder_key
+            ):
+                continue
+            try:
+                owner_app_id = int(raw_app_id)
+            except (TypeError, ValueError):
+                owner_app_id = raw_app_id
+            raise TrainerDeckError(
+                "这个修改器安装已绑定到 Steam AppID "
+                f"{owner_app_id}，请先解除原绑定"
+            )
         previous = bindings.get(key)
         previous = previous if isinstance(previous, dict) else {}
         previous_active = bool(previous.get("active", True))
@@ -1208,6 +1258,7 @@ class TrainerDeckCore:
         candidate_paths.add(str(managed_path))
         record = {
             "installation_id": installation["id"],
+            "installation_folder": str(folder),
             "managed_launch_executable": str(managed_path),
             "candidate_launch_executables": sorted(candidate_paths),
             "applied_launch_options": str(applied_launch_options or ""),

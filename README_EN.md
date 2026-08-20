@@ -27,6 +27,10 @@ Supported FLiNG trainer
 
 At runtime, the Bridge prepares a cached copy of the trainer instead of overwriting the downloaded EXE. Decky controls are enabled only for menu items that the Bridge explicitly confirms as compatible. Unknown controls and unsupported trainers can still use the standard download and binding features.
 
+One physical trainer installation can be bound to only one active game entry at
+a time. Unbind it from the original game before reusing it for another AppID so
+two launch entries cannot overwrite the same manifest.
+
 ## Before You Use It
 
 - Use TrainerDeck only with single-player or offline games. Do not use it in multiplayer games, anti-cheat environments, or any situation where it could affect other players.
@@ -119,7 +123,13 @@ pnpm run package
 release/TrainerDeck-<version>.zip
 ```
 
-The current version produces `release/TrainerDeck-0.6.9.zip`.
+The current version produces `release/TrainerDeck-0.7.0.zip`.
+
+`TrainerDeckBridgeLauncher.exe` embeds both CLR2 and CLR4 Bridge payloads. At
+runtime it selects the payload whose metadata generation exactly matches the
+trainer's managed UI and writes only the canonical `TrainerDeckBridge.dll` into
+the dedicated cache. No standalone `TrainerDeckBridge*.dll` payload is shipped
+in the plugin archive.
 
 The installation package has the following main structure:
 
@@ -132,7 +142,6 @@ TrainerDeck/
 │   └── trainerdeck_runtime.py
 ├── bin/bridge/
 │   ├── TrainerDeckBridgeLauncher.exe
-│   ├── TrainerDeckBridge.dll
 │   └── Mono.Cecil.dll
 ├── package.json
 ├── plugin.json

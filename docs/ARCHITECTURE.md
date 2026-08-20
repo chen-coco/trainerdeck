@@ -40,9 +40,16 @@ v0.5.1 的 launcher 把“本次启动的新鲜 Bridge 就绪信号”作为保�
 仍无新鲜就绪信号，就始终启动原 EXE；进程仍存活或已产生新鲜就绪信号时才抑制回退，
 避免真正的重复实例。
 
-v0.6.1 不改变上述 Launcher、Steam/CheatDeck 或恢复逻辑，只把 Bridge 后端收敛为唯一
-`net35` 的 `TrainerDeckBridge.dll`。Launcher 固定为 `net462`，不再探测 CLR 代际、
-选择第二个 DLL 或发布 `TrainerDeckBridge.Legacy.dll`。
+v0.6.1 曾把 Bridge 后端收敛为唯一的 `net35` DLL。v0.7.0 保持单一外部 Host 的部署
+边界，同时恢复严格的双代际兼容：`net462` 的 `TrainerDeckBridgeLauncher.exe` 内嵌
+`net35`/CLR2 与 `net40`/CLR4 两份同名 Bridge payload，先同时核对目标 UI 的
+`RuntimeVersion` 与唯一 `mscorlib` 主版本，再选择完全匹配的一份。两种 payload 都不作为
+外部插件文件发布；Launcher 只把选中版本以规范名 `TrainerDeckBridge.dll` 写入该修改器的
+专用缓存，未知或混合代际失败关闭。缓存按修改器哈希、AppID 与会话 token 哈希隔离为
+不可变代际，补丁 EXE、所选 Bridge 和本次实际读取的 manifest 均经唯一临时文件原子发布，
+因此并发启动或后端轮换 token 不会拼出跨会话的混合缓存。正常启动时 Host 通过子进程环境
+传入外层原子 manifest 的绝对路径；运行中的 Bridge 重连会重新读取它，后端重启轮换端口与
+token 时无需改写不可变缓存，也无需重启修改器。
 v0.6.2 将修改器操作与返回游戏拆开：操作成功只接收权威快照并留在面板，显式返回动作
 才关闭 Quick Access 并恢复当前游戏焦点。
 v0.6.4 撤回自动 locale 启动参数，并删除全局返回按钮与 App 级窗口提升。操作成功后仍只
@@ -104,10 +111,13 @@ Decky 全局组件共同保存本轮成功操作，即使插件面板卸载或�
 
 默认模式只自动填入本地游戏名；显式开启自动添加后，搜索、下载和绑定构成一次受保护流程。
 首次下载和写入启动参数后，修改器要到下一次启动游戏时才会随 Proton 启动。
-插件后端重启时会把当前安装包中的 launcher 与 bridge 资源覆盖到每个有效旧绑定的原
-目录；Launcher 路径保持不变，因此 v0.4.9 绑定无需改写启动项即可使用新二进制。若
-覆盖、哈希读取或 manifest 写入失败，对应 AppID 会进入 `error` 快照，前端面板显示
-具体原因，而不是继续显示笼统的 `not_prepared`。
+插件后端重启时会把当前安装包中的 launcher 与运行依赖更新到每个有效旧绑定的原目录；
+Launcher 路径保持不变，因此 v0.4.9 绑定无需改写启动项即可使用新二进制。Host、Cecil
+与 manifest 在同一串行事务中先写入唯一 staging，再原子替换 live 路径；任一步失败会
+回滚已发布项，确认整组成功后才清理旧外置 Bridge。若覆盖、哈希读取或 manifest 写入
+失败，对应 AppID 会进入 `error` 快照，前端面板显示具体原因，而不是继续显示笼统的
+`not_prepared`。一个物理修改器安装同一时间只允许归属一个活跃 AppID，解除原绑定后才可
+重新绑定，避免两个启动项争用同一份外层 manifest。
 
 ## Decky API 边界
 
@@ -200,6 +210,11 @@ Bridge 0.6.7 不改变原修改器窗口的可见性、任务栏或激活状态�
 - 可选 SHA-256 校验。
 - bridge 端点只监听 loopback；每个 AppID 在准备绑定或 Decky 后端重启时生成
   独立的 256-bit 随机 token，并使用 1 MiB 帧上限、session ID 与单调 revision。
+- Bridge 准备事务进程内串行，临时文件名包含随机 UUID；单安装单 AppID 所有权在写文件前
+  校验，解除绑定或后端停止时同步撤销 token、会话与所有权。外层 manifest 作为已失效
+  快照保留并由下次准备原子覆盖，避免旧后端按路径删除新后端刚发布的清单。
+- TCP 连接从 accept 起按后端生命周期代次跟踪；停止时关闭 writer、取消并等待全部 handler，
+  延迟握手或阻塞回调不能在停止完成后重新登记已认证会话。
 - bridge 只处理当前菜单公布的 opaque option ID；开关请求必须带期望 revision，
   数值请求还必须带期望旧值，动作请求只允许已确认的纯动作 ID。超时不会把开关、
   数值或动作预先显示为成功。

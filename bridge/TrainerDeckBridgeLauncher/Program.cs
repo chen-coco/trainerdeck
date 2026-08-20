@@ -13,6 +13,8 @@ namespace TrainerDeckBridgeLauncher
         private const string ManifestName = "trainerdeck-bridge.json";
         private const string BridgeLogName = "trainerdeck-bridge.log";
         private const string BridgeReadyLine = "Bridge started.";
+        private const string LiveManifestEnvironmentVariable =
+            "TRAINERDECK_BRIDGE_MANIFEST";
         private const int MinimumStartupObservationMilliseconds = 12000;
         private const int MaximumStartupObservationMilliseconds = 30000;
         private const int StartupObservationPaddingMilliseconds = 5000;
@@ -101,6 +103,12 @@ namespace TrainerDeckBridgeLauncher
                     + originalPath
                     + "\" working_directory=\""
                     + trainer.WorkingDirectory
+                    + "\" runtime="
+                    + trainer.RuntimeLabel
+                    + " runtime_version=\""
+                    + trainer.RuntimeVersion
+                    + "\" payload=\""
+                    + trainer.PayloadName
                     + "\".");
                 Console.WriteLine(trainer.PreparedPath);
                 if (prepareOnly)
@@ -117,7 +125,8 @@ namespace TrainerDeckBridgeLauncher
                     preparedProcess = StartProcess(
                         trainer.PreparedPath,
                         trainer.WorkingDirectory,
-                        forwarded);
+                        forwarded,
+                        manifestPath);
                 }
                 catch (Exception startError)
                 {
@@ -210,13 +219,34 @@ namespace TrainerDeckBridgeLauncher
         private static Process StartProcess(
             string executablePath,
             string workingDirectory,
-            IList<string> forwarded)
+            IList<string> forwarded,
+            string liveManifestPath = null)
         {
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = executablePath;
             startInfo.WorkingDirectory = workingDirectory;
             startInfo.UseShellExecute = false;
             startInfo.Arguments = JoinArguments(forwarded);
+            if (!string.IsNullOrWhiteSpace(liveManifestPath))
+            {
+                string resolvedManifestPath = Path.GetFullPath(
+                    liveManifestPath);
+                if (!string.Equals(
+                        Path.GetFileName(resolvedManifestPath),
+                        ManifestName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "The live bridge manifest has an unexpected name.");
+                }
+
+                // The immutable cache keeps the exact launch snapshot, while
+                // the running Bridge follows this atomically replaced outer
+                // manifest so a Decky backend restart can rotate port/token
+                // without relaunching the trainer.
+                startInfo.EnvironmentVariables[
+                    LiveManifestEnvironmentVariable] = resolvedManifestPath;
+            }
 
             LauncherLog.Write(
                 "Process.Start requested: path=\""

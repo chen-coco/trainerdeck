@@ -9,6 +9,54 @@ from scripts import package
 
 
 class DeckyPackageTests(unittest.TestCase):
+    @staticmethod
+    def _write_bridge_fixture(
+        directory: Path,
+        *,
+        omitted_build_inputs: tuple[str, ...] = (),
+    ) -> dict[str, bytes]:
+        directory.mkdir(parents=True)
+        payloads = {
+            "TrainerDeckBridge.Clr2.dll": b"MZ-clr2-payload\0unique",
+            "TrainerDeckBridge.Clr4.dll": b"MZ-clr4-payload\0unique",
+        }
+        (directory / package.BRIDGE_HOST_FILE).write_bytes(b"MZ-host")
+        for filename, payload in payloads.items():
+            if filename not in omitted_build_inputs:
+                (directory / filename).write_bytes(payload)
+        return payloads
+
+    def _validate_bridge_fixture(
+        self,
+        directory: Path,
+        resources: dict[str, bytes | None],
+        contracts: dict[str, tuple[str, int]] | None = None,
+    ) -> None:
+        expected_contracts = (
+            contracts
+            if contracts is not None
+            else {
+                "TrainerDeckBridge.Clr2.dll": ("v2.0.50727", 2),
+                "TrainerDeckBridge.Clr4.dll": ("v4.0.30319", 4),
+            }
+        )
+
+        def read_contract(image: bytes, label: str) -> tuple[str, int]:
+            filename = Path(label).name
+            self.assertEqual(image, (directory / filename).read_bytes())
+            return expected_contracts[filename]
+
+        with mock.patch.object(
+            package,
+            "_read_manifest_resources",
+            return_value=resources,
+        ), mock.patch.object(
+            package,
+            "_read_managed_runtime_contract",
+            side_effect=read_contract,
+        ):
+            package._validate_embedded_bridge_payloads(directory)
+
     def test_release_version_is_consistent(self):
         main_source = (package.ROOT / "main.py").read_text(encoding="utf-8")
         readme = (package.ROOT / "README.md").read_text(encoding="utf-8")
@@ -69,14 +117,13 @@ class DeckyPackageTests(unittest.TestCase):
                     names,
                 )
                 self.assertIn("TrainerDeck/README_EN.md", names)
-                self.assertIn(
-                    "TrainerDeck/bin/bridge/TrainerDeckBridge.dll",
-                    names,
-                )
-                self.assertNotIn(
-                    "TrainerDeck/bin/bridge/TrainerDeckBridge.Legacy.dll",
-                    names,
-                )
+                external_bridge_payloads = [
+                    name
+                    for name in names
+                    if Path(name).name.startswith("TrainerDeckBridge")
+                    and name.casefold().endswith(".dll")
+                ]
+                self.assertEqual(external_bridge_payloads, [])
                 self.assertNotIn(
                     "TrainerDeck/bin/bridge/TrainerDeckBridgeLauncher.exe.config",
                     names,
@@ -92,6 +139,141 @@ class DeckyPackageTests(unittest.TestCase):
                     for _, destination in package._archive_entries()
                 }
                 self.assertEqual(set(names), expected)
+
+    def test_clr_payloads_are_build_inputs_not_release_files(self):
+        self.assertEqual(
+            set(package.BRIDGE_BUILD_ONLY_FILES),
+            {
+                "TrainerDeckBridge.Clr2.dll",
+                "TrainerDeckBridge.Clr4.dll",
+            },
+        )
+        self.assertTrue(
+            set(package.BRIDGE_BUILD_ONLY_FILES).isdisjoint(
+                package.BRIDGE_FILES
+            )
+        )
+
+    def test_embedded_bridge_payload_validation_accepts_exact_resources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge_directory = Path(temporary) / "bridge"
+            payloads = self._write_bridge_fixture(bridge_directory)
+
+            self._validate_bridge_fixture(
+                bridge_directory,
+                dict(payloads),
+            )
+
+    def test_embedded_bridge_payload_validation_rejects_missing_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge_directory = Path(temporary) / "bridge"
+            payloads = self._write_bridge_fixture(bridge_directory)
+            resources = {
+                "prefix.TrainerDeckBridge.Clr2.dll": payloads[
+                    "TrainerDeckBridge.Clr2.dll"
+                ],
+                "TrainerDeckBridge.Clr2.dll.extra": payloads[
+                    "TrainerDeckBridge.Clr2.dll"
+                ],
+                "TrainerDeckBridge.Clr4.dll": payloads[
+                    "TrainerDeckBridge.Clr4.dll"
+                ],
+            }
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "missing resource name TrainerDeckBridge[.]Clr2[.]dll",
+            ):
+                self._validate_bridge_fixture(bridge_directory, resources)
+
+    def test_embedded_bridge_payload_validation_rejects_missing_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge_directory = Path(temporary) / "bridge"
+            payloads = self._write_bridge_fixture(bridge_directory)
+            resources = dict(payloads)
+            resources["TrainerDeckBridge.Clr4.dll"] = b"wrong-payload"
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "payload mismatch TrainerDeckBridge[.]Clr4[.]dll",
+            ):
+                self._validate_bridge_fixture(bridge_directory, resources)
+
+    def test_embedded_bridge_payload_validation_rejects_swapped_mapping(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge_directory = Path(temporary) / "bridge"
+            payloads = self._write_bridge_fixture(bridge_directory)
+            resources = {
+                "TrainerDeckBridge.Clr2.dll": payloads[
+                    "TrainerDeckBridge.Clr4.dll"
+                ],
+                "TrainerDeckBridge.Clr4.dll": payloads[
+                    "TrainerDeckBridge.Clr2.dll"
+                ],
+            }
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "payload mismatch TrainerDeckBridge[.]Clr2[.]dll",
+            ):
+                self._validate_bridge_fixture(bridge_directory, resources)
+
+    def test_embedded_bridge_payload_validation_rejects_two_clr4_payloads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge_directory = Path(temporary) / "bridge"
+            payloads = self._write_bridge_fixture(bridge_directory)
+            contracts = {
+                "TrainerDeckBridge.Clr2.dll": ("v4.0.30319", 4),
+                "TrainerDeckBridge.Clr4.dll": ("v4.0.30319", 4),
+            }
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "runtime family mismatch TrainerDeckBridge[.]Clr2[.]dll",
+            ):
+                self._validate_bridge_fixture(
+                    bridge_directory,
+                    dict(payloads),
+                    contracts,
+                )
+
+    def test_embedded_bridge_payload_validation_rejects_wrong_core_family(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge_directory = Path(temporary) / "bridge"
+            payloads = self._write_bridge_fixture(bridge_directory)
+            contracts = {
+                "TrainerDeckBridge.Clr2.dll": ("v2.0.50727", 2),
+                "TrainerDeckBridge.Clr4.dll": ("v4.0.30319", 2),
+            }
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "metadata='v4[.]0[.]30319', mscorlib=2; expected clr4",
+            ):
+                self._validate_bridge_fixture(
+                    bridge_directory,
+                    dict(payloads),
+                    contracts,
+                )
+
+    def test_embedded_bridge_payload_validation_rejects_missing_build_input(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge_directory = Path(temporary) / "bridge"
+            self._write_bridge_fixture(
+                bridge_directory,
+                omitted_build_inputs=("TrainerDeckBridge.Clr2.dll",),
+            )
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "Missing bridge build inputs: TrainerDeckBridge[.]Clr2[.]dll",
+            ):
+                package._validate_embedded_bridge_payloads(bridge_directory)
+
+    def test_production_bridge_host_contains_both_exact_payloads(self):
+        package._validate_embedded_bridge_payloads()
 
 
 if __name__ == "__main__":

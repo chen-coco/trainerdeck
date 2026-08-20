@@ -7,6 +7,10 @@ namespace TrainerDeckBridge
 {
     public static class EntryPoint
     {
+        private const string ManifestName = "trainerdeck-bridge.json";
+        private const string LiveManifestEnvironmentVariable =
+            "TRAINERDECK_BRIDGE_MANIFEST";
+
         private static readonly object Gate = new object();
         private static BridgeRuntime runtime;
         private static object attachedWindow;
@@ -38,9 +42,7 @@ namespace TrainerDeckBridge
 
                 try
                 {
-                    string manifestPath = Path.Combine(
-                        AppDomain.CurrentDomain.BaseDirectory,
-                        "trainerdeck-bridge.json");
+                    string manifestPath = ResolveManifestPath();
                     BridgeManifest manifest = BridgeManifest.Load(
                         manifestPath,
                         false);
@@ -84,6 +86,31 @@ namespace TrainerDeckBridge
                     BridgeLog.Write("Bridge start failed: " + ex);
                 }
             }
+        }
+
+        private static string ResolveManifestPath()
+        {
+            string adjacentPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                ManifestName);
+            string livePath = Environment.GetEnvironmentVariable(
+                LiveManifestEnvironmentVariable);
+            if (FrameworkCompat.IsNullOrWhiteSpace(livePath))
+            {
+                return adjacentPath;
+            }
+
+            string resolved = Path.GetFullPath(livePath);
+            if (!string.Equals(
+                    Path.GetFileName(resolved),
+                    ManifestName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    "The live bridge manifest has an unexpected name.");
+            }
+
+            return resolved;
         }
 
         public static void ReportOptionState(

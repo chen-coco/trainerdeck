@@ -5,16 +5,28 @@
     <OutputType>WinExe</OutputType>
     <Platforms>AnyCPU</Platforms>
     <TargetFramework>net462</TargetFramework>
-    <Version>0.6.7</Version>
+    <Version>0.7.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="..\Shared\BridgeManifest.cs" Link="Protocol\BridgeManifest.cs" />
     <Compile Include="..\Shared\FrameworkCompat.cs" Link="Compatibility\FrameworkCompat.cs" />
     <Compile Include="..\Shared\JsonCodec.cs" Link="Protocol\JsonCodec.cs" />
+    <ProjectReference Include="../TrainerDeckBridge/TrainerDeckBridge.csproj"
+                      ReferenceOutputAssembly="false"
+                      SkipGetTargetFrameworkProperties="true" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net462"
                       Version="1.0.3"
                       PrivateAssets="all" />
     <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="../TrainerDeckBridge/bin/$(Configuration)/net35/TrainerDeckBridge.dll"
+                      Link="Payloads/TrainerDeckBridge.Clr2.dll"
+                      LogicalName="TrainerDeckBridge.Clr2.dll" />
+    <EmbeddedResource Include="../TrainerDeckBridge/bin/$(Configuration)/net40/TrainerDeckBridge.dll"
+                      Link="Payloads/TrainerDeckBridge.Clr4.dll"
+                      LogicalName="TrainerDeckBridge.Clr4.dll" />
   </ItemGroup>
 </Project>

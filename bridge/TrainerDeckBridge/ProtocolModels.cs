@@ -93,7 +93,7 @@ namespace TrainerDeckBridge
             message["session_id"] = sessionId;
             message["trainer_sha256"] = trainerSha256 ?? string.Empty;
             message["ui_fingerprint"] = uiFingerprint ?? string.Empty;
-            message["bridge_version"] = "0.6.7";
+            message["bridge_version"] = "0.7.0";
             message["state_authority"] = "core_callback";
             message["value_state_authority"] = "ui_control_readback";
             message["capabilities"] = new[]

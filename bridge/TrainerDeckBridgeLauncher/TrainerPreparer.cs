@@ -1,6 +1,10 @@
 using System;
+using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Security.Cryptography;
+using System.Text;
+using TrainerDeckBridge;
 using TrainerDeckBridge.Protocol;
 
 namespace TrainerDeckBridgeLauncher
@@ -12,11 +16,28 @@ namespace TrainerDeckBridgeLauncher
         public string PreparedPath { get; set; }
 
         public string WorkingDirectory { get; set; }
+
+        public string RuntimeLabel { get; set; }
+
+        public string RuntimeVersion { get; set; }
+
+        public string PayloadName { get; set; }
+    }
+
+    internal sealed class BridgePayload
+    {
+        public string ResourceName { get; set; }
+
+        public byte[] Data { get; set; }
     }
 
     internal static class TrainerPreparer
     {
         private const string BridgeFileName = "TrainerDeckBridge.dll";
+        private const string Clr2BridgeResourceName =
+            "TrainerDeckBridge.Clr2.dll";
+        private const string Clr4BridgeResourceName =
+            "TrainerDeckBridge.Clr4.dll";
 
         private static readonly byte[] StandardMzFirst32 =
         {
@@ -65,9 +86,15 @@ namespace TrainerDeckBridgeLauncher
                     "The trainer SHA-256 no longer matches the prepared manifest.");
             }
 
+            string tokenHash = ComputeSha256Text(manifest.token);
             string cacheDirectory = Path.Combine(
                 cacheRoot,
-                trainerHash.Substring(0, 16));
+                trainerHash.Substring(0, 16)
+                    + "-a"
+                    + manifest.app_id.ToString(
+                        CultureInfo.InvariantCulture)
+                    + "-s"
+                    + tokenHash.Substring(0, 16));
             Directory.CreateDirectory(cacheDirectory);
             TryHide(cacheDirectory);
 
@@ -85,10 +112,11 @@ namespace TrainerDeckBridgeLauncher
 
             string stagingPath = Path.Combine(
                 cacheDirectory,
-                Path.GetFileNameWithoutExtension(originalPath)
-                    + ".trainerdeck-staging-"
-                    + Guid.NewGuid().ToString("N")
-                    + ".exe");
+                ".td-"
+                    + Guid.NewGuid().ToString("N").Substring(0, 16)
+                    + ".tmp");
+            ManagedRuntimeInfo selectedRuntime = null;
+            BridgePayload selectedPayload = null;
 
             try
             {
@@ -101,19 +129,26 @@ namespace TrainerDeckBridgeLauncher
                 byte[] xorKey = DeriveXorKey(encryptedUi.Data);
                 byte[] decryptedUi = ApplyXor(encryptedUi.Data, xorKey);
                 EnsureMz(decryptedUi);
-                string bridgeAssemblyPath = Path.Combine(
-                    launcherDirectory,
-                    BridgeFileName);
-                if (!File.Exists(bridgeAssemblyPath))
-                {
-                    throw new FileNotFoundException(
-                        "TrainerDeckBridge.dll is required.",
-                        bridgeAssemblyPath);
-                }
+                selectedRuntime = UiAssemblyPatcher.InspectRuntime(
+                    decryptedUi,
+                    "Trainer UI");
+                selectedPayload = ReadEmbeddedBridgePayload(
+                    selectedRuntime);
+                LauncherLog.Write(
+                    "Bridge payload selected: runtime="
+                    + selectedRuntime.RuntimeLabel
+                    + " runtime_version=\""
+                    + selectedRuntime.RuntimeVersion
+                    + "\" mscorlib_major="
+                    + selectedRuntime.MscorlibMajor
+                    + " payload=\""
+                    + selectedPayload.ResourceName
+                    + "\".");
 
                 byte[] patchedUi = UiAssemblyPatcher.InjectBridgeStart(
                     decryptedUi,
-                    bridgeAssemblyPath);
+                    selectedPayload.Data,
+                    selectedRuntime.Runtime);
                 EnsureMz(patchedUi);
                 byte[] encryptedPatchedUi = ApplyXor(patchedUi, xorKey);
                 PeUiResource.Replace(
@@ -134,15 +169,22 @@ namespace TrainerDeckBridgeLauncher
                 ClearCacheFileOverwriteAttributes(cachedBridgePath);
                 ClearCacheFileOverwriteAttributes(cachedManifestPath);
 
-                File.Copy(stagingPath, preparedPath, true);
-                File.Copy(
-                    bridgeAssemblyPath,
+                PublishCacheFile(stagingPath, preparedPath);
+                AtomicWriteBytes(
                     cachedBridgePath,
-                    true);
-                File.Copy(
-                    manifestPath,
+                    selectedPayload.Data);
+                AtomicWriteText(
                     cachedManifestPath,
-                    true);
+                    JsonCodec.Serialize(manifest));
+
+                LauncherLog.Write(
+                    "Bridge payload cached: runtime="
+                    + selectedRuntime.RuntimeLabel
+                    + " payload=\""
+                    + selectedPayload.ResourceName
+                    + "\" cached_as=\""
+                    + cachedBridgePath
+                    + "\".");
 
                 TryHide(preparedPath);
                 TryHide(cachedBridgePath);
@@ -166,8 +208,71 @@ namespace TrainerDeckBridgeLauncher
             {
                 OriginalPath = originalPath,
                 PreparedPath = preparedPath,
-                WorkingDirectory = Path.GetDirectoryName(originalPath)
+                WorkingDirectory = Path.GetDirectoryName(originalPath),
+                RuntimeLabel = selectedRuntime.RuntimeLabel,
+                RuntimeVersion = selectedRuntime.RuntimeVersion,
+                PayloadName = selectedPayload.ResourceName
             };
+        }
+
+        private static BridgePayload ReadEmbeddedBridgePayload(
+            ManagedRuntimeInfo selectedRuntime)
+        {
+            if (selectedRuntime == null)
+            {
+                throw new ArgumentNullException("selectedRuntime");
+            }
+
+            string resourceName = selectedRuntime.Runtime == BridgeRuntime.Clr2
+                ? Clr2BridgeResourceName
+                : Clr4BridgeResourceName;
+            Assembly launcherAssembly = typeof(TrainerPreparer).Assembly;
+            using (Stream resource =
+                launcherAssembly.GetManifestResourceStream(resourceName))
+            {
+                if (resource == null)
+                {
+                    throw new InvalidDataException(
+                        "Embedded bridge payload is missing: "
+                        + resourceName
+                        + ".");
+                }
+
+                using (MemoryStream copy = new MemoryStream())
+                {
+                    resource.CopyTo(copy);
+                    byte[] data = copy.ToArray();
+                    if (data.Length == 0)
+                    {
+                        throw new InvalidDataException(
+                            "Embedded bridge payload is empty: "
+                            + resourceName
+                            + ".");
+                    }
+
+                    ManagedRuntimeInfo payloadRuntime =
+                        UiAssemblyPatcher.InspectRuntime(
+                            data,
+                            "Embedded bridge payload " + resourceName);
+                    if (payloadRuntime.Runtime != selectedRuntime.Runtime)
+                    {
+                        throw new InvalidDataException(
+                            "Embedded bridge payload "
+                            + resourceName
+                            + " has runtime "
+                            + payloadRuntime.RuntimeLabel
+                            + ", expected "
+                            + selectedRuntime.RuntimeLabel
+                            + ".");
+                    }
+
+                    return new BridgePayload
+                    {
+                        ResourceName = resourceName,
+                        Data = data
+                    };
+                }
+            }
         }
 
         private static byte[] DeriveXorKey(byte[] encryptedUi)
@@ -262,6 +367,151 @@ namespace TrainerDeckBridgeLauncher
                 return BitConverter.ToString(hash)
                     .Replace("-", string.Empty)
                     .ToLowerInvariant();
+            }
+        }
+
+        private static string ComputeSha256Text(string value)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value ?? string.Empty);
+            using (SHA256 sha = SHA256.Create())
+            {
+                return BitConverter.ToString(sha.ComputeHash(bytes))
+                    .Replace("-", string.Empty)
+                    .ToLowerInvariant();
+            }
+        }
+
+        private static void AtomicWriteBytes(string path, byte[] data)
+        {
+            string staging = CreateShortStagingPath(path);
+            try
+            {
+                File.WriteAllBytes(staging, data);
+                PublishCacheFile(staging, path);
+            }
+            finally
+            {
+                TryDelete(staging);
+            }
+        }
+
+        private static void AtomicWriteText(string path, string value)
+        {
+            string staging = CreateShortStagingPath(path);
+            try
+            {
+                File.WriteAllText(
+                    staging,
+                    value,
+                    new UTF8Encoding(false));
+                PublishCacheFile(staging, path);
+            }
+            finally
+            {
+                TryDelete(staging);
+            }
+        }
+
+        private static string CreateShortStagingPath(string destination)
+        {
+            return Path.Combine(
+                Path.GetDirectoryName(destination),
+                ".td-"
+                    + Guid.NewGuid().ToString("N").Substring(0, 16)
+                    + ".tmp");
+        }
+
+        private static void PublishCacheFile(
+            string staging,
+            string destination)
+        {
+            if (File.Exists(destination))
+            {
+                EnsureSameCacheFile(staging, destination);
+                TryDelete(staging);
+                return;
+            }
+
+            try
+            {
+                File.Move(staging, destination);
+            }
+            catch (IOException)
+            {
+                // A second Host using the same immutable session generation
+                // may win the first publish. Its files describe the same
+                // trainer hash, AppID, and token, so the existing destination
+                // is authoritative and safe to reuse.
+                if (!File.Exists(destination))
+                {
+                    throw;
+                }
+
+                EnsureSameCacheFile(staging, destination);
+            }
+        }
+
+        private static void EnsureSameCacheFile(
+            string staging,
+            string destination)
+        {
+            FileInfo staged = new FileInfo(staging);
+            FileInfo published = new FileInfo(destination);
+            if (staged.Length != published.Length)
+            {
+                throw new InvalidDataException(
+                    "Immutable TrainerDeck cache generation conflict: "
+                    + destination);
+            }
+
+            using (FileStream left = File.OpenRead(staging))
+            using (FileStream right = File.OpenRead(destination))
+            {
+                byte[] leftBuffer = new byte[64 * 1024];
+                byte[] rightBuffer = new byte[leftBuffer.Length];
+                int leftCount;
+                while ((leftCount = left.Read(
+                    leftBuffer,
+                    0,
+                    leftBuffer.Length)) > 0)
+                {
+                    int rightCount = right.Read(
+                        rightBuffer,
+                        0,
+                        rightBuffer.Length);
+                    if (leftCount != rightCount)
+                    {
+                        throw new InvalidDataException(
+                            "Immutable TrainerDeck cache generation conflict: "
+                            + destination);
+                    }
+
+                    for (int index = 0; index < leftCount; index++)
+                    {
+                        if (leftBuffer[index] != rightBuffer[index])
+                        {
+                            throw new InvalidDataException(
+                                "Immutable TrainerDeck cache generation conflict: "
+                                + destination);
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void TryDelete(string path)
+        {
+            if (!File.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                File.Delete(path);
+            }
+            catch
+            {
             }
         }
 
