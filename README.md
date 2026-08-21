@@ -3,6 +3,8 @@
 **简体中文** | [English](README_EN.md)
 
 TrainerDeck 是一个面向 Steam Deck 游戏模式的 Decky Loader 插件。它可以识别当前游戏、搜索和下载独立 FLiNG 修改器、管理 Steam 启动项，并把受支持修改器的控制菜单同步到 Decky 快捷面板。
+
+###截图:
 <img src="docs/menu.jpeg" width="600"> 
 
 ## 主要功能
