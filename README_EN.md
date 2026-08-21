@@ -4,6 +4,11 @@
 
 TrainerDeck is a Decky Loader plugin for Steam Deck Game Mode. It can identify the current game, search for and download standalone FLiNG trainers, manage Steam launch options, and mirror the controls of supported trainers in the Decky quick-access panel.
 
+### screenshot:
+
+<img src="docs/menu.jpeg" width="600"> 
+<img src="docs/cheat.jpg" width="600"> 
+
 ## Key Features
 
 - Automatically detects the currently running Steam game or non-Steam shortcut.
