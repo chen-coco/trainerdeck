@@ -7,7 +7,7 @@ TrainerDeck 是一个面向 Steam Deck 游戏模式的 Decky Loader 插件。它
 ### 截图:
 
 <img src="docs/menu.jpeg" width="600"> 
-<img src="docs/cheat.jpg" width="600"> 
+<img src="docs/menu.jpg" width="600"> 
 
 
 ## 主要功能
