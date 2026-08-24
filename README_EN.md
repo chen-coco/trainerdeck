@@ -7,7 +7,7 @@ TrainerDeck is a Decky Loader plugin for Steam Deck Game Mode. It can identify t
 ### screenshot:
 
 <img src="docs/menu.jpeg" width="600"> 
-<img src="docs/cheat.jpg" width="600"> 
+<img src="docs/menu.jpg" width="600"> 
 
 ## Key Features
 
