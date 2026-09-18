@@ -8,6 +8,7 @@ import {
 import {
   ButtonItem,
   DialogButton,
+  Dropdown,
   Focusable,
   Navigation,
   PanelSection,
@@ -235,11 +236,17 @@ function RuntimeOptionRow({
   const [hovered, setHovered] = useState(false);
   const [tooltipPinned, setTooltipPinned] = useState(false);
   const [validationError, setValidationError] = useState("");
+  const [editingChoice, setEditingChoice] = useState(false);
+  const valueWasPending = useRef(false);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const label = localizedTrainerText(option.labels) || option.id;
   const tooltip = localizedTrainerText(option.tooltips);
   const hasToggle = option.controllable && option.active !== null;
   const hasValue = option.value_controllable;
+  const hasSelect = option.kind === "select";
+  const choices = option.choices ?? [];
+  const editableChoice = hasSelect && option.choice_editable === true;
+  const customChoice = editableChoice && (editingChoice || !choices.includes(draft));
   const hasAction = option.action_controllable && !hasToggle && !hasValue;
   const valueIsNumeric = option.value_type !== "text";
   const rowDisabled =
@@ -256,14 +263,18 @@ function RuntimeOptionRow({
 
   useEffect(() => {
     if (option.value_pending) {
+      valueWasPending.current = true;
       return;
     }
-    if (!dirty || draft === (option.value ?? "")) {
+    const selectionApplied = hasSelect && valueWasPending.current && !option.value_error;
+    valueWasPending.current = false;
+    if (!dirty || draft === (option.value ?? "") || selectionApplied) {
       setDraft(option.value ?? "");
       setDirty(false);
+      setEditingChoice(false);
       setValidationError("");
     }
-  }, [dirty, draft, option.value, option.value_pending]);
+  }, [dirty, draft, hasSelect, option.value, option.value_pending, option.value_error]);
 
   useEffect(() => {
     if ((!focused && !gamepadFocused) || !tooltip) {
@@ -285,6 +296,9 @@ function RuntimeOptionRow({
     }
     if (value.length > 200) {
       return t("输入内容过长", "The value is too long");
+    }
+    if (hasSelect && !editableChoice && !choices.includes(value)) {
+      return t("请选择列表中的位置", "Select a location from the list");
     }
     if (!valueIsNumeric) {
       return "";
@@ -417,7 +431,7 @@ function RuntimeOptionRow({
         />
       )}
 
-      {hasValue && (
+      {(hasValue || hasSelect) && (
         <div style={{ marginTop: hasToggle ? "6px" : 0 }}>
           {!hasToggle && (
             <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "6px" }}>
@@ -432,40 +446,71 @@ function RuntimeOptionRow({
               gridTemplateColumns: "minmax(0, 1fr) auto",
             }}
           >
-            <TextField
-              label={hasToggle ? t("数值", "Value") : undefined}
-              description={rangeDescription || undefined}
-              value={draft}
-              mustBeNumeric={valueIsNumeric}
-              rangeMin={option.minimum}
-              rangeMax={option.maximum}
-              disabled={rowDisabled}
-              inputMode={valueIsNumeric ? "decimal" : "text"}
-              onChange={(event) => {
-                setDraft(event.currentTarget.value);
-                setDirty(true);
-                setValidationError("");
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  submitValue();
-                }
-              }}
-            />
+            <div style={{ minWidth: 0 }}>
+              {hasSelect && (
+                <Dropdown
+                  rgOptions={[
+                    ...choices.map((value) => ({ data: value, label: value })),
+                    ...(editableChoice
+                      ? [{ data: null, label: t("新建位置…", "New location…") }]
+                      : []),
+                  ]}
+                  selectedOption={customChoice ? null : draft}
+                  strDefaultLabel={t("选择已保存的位置", "Select a saved location")}
+                  menuLabel={label}
+                  disabled={rowDisabled || !hasValue || (!editableChoice && choices.length === 0)}
+                  onChange={({ data }) => {
+                    setEditingChoice(data === null);
+                    setDraft(typeof data === "string" ? data : "");
+                    setDirty(true);
+                    setValidationError("");
+                  }}
+                />
+              )}
+              {(!hasSelect || customChoice) && (
+                <TextField
+                  label={hasSelect
+                    ? t("位置名称", "Location name")
+                    : hasToggle ? t("数值", "Value") : undefined}
+                  description={rangeDescription || undefined}
+                  value={draft}
+                  mustBeNumeric={valueIsNumeric}
+                  rangeMin={option.minimum}
+                  rangeMax={option.maximum}
+                  disabled={rowDisabled || !hasValue}
+                  inputMode={valueIsNumeric ? "decimal" : "text"}
+                  onChange={(event) => {
+                    setDraft(event.currentTarget.value);
+                    setDirty(true);
+                    setValidationError("");
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      submitValue();
+                    }
+                  }}
+                />
+              )}
+            </div>
             <DialogButton
               disabled={
                 rowDisabled ||
+                !hasValue ||
+                (hasSelect && !editableChoice && !choices.includes(draft)) ||
                 (!dirty && option.value_apply_mode !== "invoke")
               }
               onClick={submitValue}
               style={{ minWidth: "68px" }}
             >
-              {option.value_apply_mode === "invoke"
+              {hasSelect ? t("应用", "Apply") : option.value_apply_mode === "invoke"
                 ? t("执行", "Run")
                 : t("应用", "Apply")}
             </DialogButton>
           </div>
+          {hasSelect && !editableChoice && choices.length === 0 && (
+            <SmallNote>{t("暂无已保存的位置，请先保存一个位置。", "Save a location before teleporting.")}</SmallNote>
+          )}
           {!description && option.value_apply_mode === "stage_then_toggle" && (
             <SmallNote>
               {option.active === true
@@ -513,7 +558,7 @@ function RuntimeOptionRow({
         </div>
       )}
 
-      {!hasToggle && !hasValue && !hasAction && (
+      {!hasToggle && !hasValue && !hasAction && !hasSelect && (
         <ButtonItem
           layout="below"
           highlightOnFocus

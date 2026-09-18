@@ -13,6 +13,8 @@ namespace TrainerDeckBridge
     internal sealed class ReflectionMenuReader
     {
         private const int MaxInputValueLength = 256;
+        private const int MaxChoices = 128;
+        private const int MaxChoiceLength = 200;
 
         private const BindingFlags InstanceFlags =
             BindingFlags.Instance
@@ -323,16 +325,12 @@ namespace TrainerDeckBridge
 
             List<ControlBinding> controls = ReadOptionControls();
             MenuDefinitionSnapshot definition = ReadMenuDefinition();
-            bool mergeDefinition = definition != null
-                && definition.options != null
-                && definition.options.Count == controls.Count;
+            MenuDefinitionOption[] definitions = MatchDefinitions(controls, definition);
 
             for (int index = 0; index < controls.Count; index++)
             {
                 ControlBinding binding = controls[index];
-                MenuDefinitionOption defined = mergeDefinition
-                    ? definition.options[index]
-                    : null;
+                MenuDefinitionOption defined = definitions[index];
                 string optionId = binding.OptionId;
                 if (FrameworkCompat.IsNullOrWhiteSpace(optionId) && defined != null)
                 {
@@ -361,6 +359,49 @@ namespace TrainerDeckBridge
             }
 
             return snapshot;
+        }
+
+        private static MenuDefinitionOption[] MatchDefinitions(
+            List<ControlBinding> controls,
+            MenuDefinitionSnapshot definition)
+        {
+            MenuDefinitionOption[] matches = new MenuDefinitionOption[controls.Count];
+            if (definition == null || definition.options == null)
+            {
+                return matches;
+            }
+            Dictionary<string, MenuDefinitionOption> byId =
+                new Dictionary<string, MenuDefinitionOption>(StringComparer.Ordinal);
+            bool positional = definition.options.Count == controls.Count;
+            for (int index = 0; index < definition.options.Count; index++)
+            {
+                MenuDefinitionOption option = definition.options[index];
+                if (FrameworkCompat.IsNullOrWhiteSpace(option.id))
+                {
+                    continue;
+                }
+                byId[option.id] = option;
+                if (positional
+                    && !FrameworkCompat.IsNullOrWhiteSpace(controls[index].OptionId)
+                    && !string.Equals(controls[index].OptionId, option.id, StringComparison.Ordinal))
+                {
+                    positional = false;
+                }
+            }
+            for (int index = 0; index < controls.Count; index++)
+            {
+                string id = controls[index].OptionId;
+                MenuDefinitionOption match;
+                if (!FrameworkCompat.IsNullOrWhiteSpace(id) && byId.TryGetValue(id, out match))
+                {
+                    matches[index] = match;
+                }
+                else if (positional)
+                {
+                    matches[index] = definition.options[index];
+                }
+            }
+            return matches;
         }
 
         private List<ControlBinding> ReadOptionControls()
@@ -452,7 +493,11 @@ namespace TrainerDeckBridge
                 return;
             }
 
-            if ((FrameworkCompat.IsNullOrWhiteSpace(option.kind)
+            if (defined.kind == "unknown")
+            {
+                option.kind = "unknown";
+            }
+            else if ((FrameworkCompat.IsNullOrWhiteSpace(option.kind)
                     || string.Equals(
                         option.kind,
                         "unknown",
@@ -592,7 +637,56 @@ namespace TrainerDeckBridge
             option.minimum = ReadNullableDouble(control, "MinimumValue");
             option.maximum = ReadNullableDouble(control, "MaximumValue");
             option.step = ReadNullableDouble(control, "Stepping");
+            if (option.kind == "select")
+            {
+                ReadChoices(option, control);
+            }
             return option;
+        }
+
+        private static void ReadChoices(TrainerOption option, object control)
+        {
+            object combo = GetMemberValue(control, "m_combobox");
+            object box = GetMemberValue(combo, "m_box");
+            IEnumerable items = GetMemberValue(box, "Items") as IEnumerable;
+            bool? editable = ReadNullableBoolean(box, "IsEditable");
+            if (items == null || !editable.HasValue)
+            {
+                return;
+            }
+            List<string> choices = new List<string>();
+            int count = 0;
+            foreach (object item in items)
+            {
+                string value = item as string;
+                if (++count > MaxChoices || value == null || value.Length == 0
+                    || value.Length > MaxChoiceLength || value != value.Trim()
+                    || ContainsControlCharacters(value))
+                {
+                    return;
+                }
+                if (!choices.Contains(value))
+                {
+                    choices.Add(value);
+                }
+            }
+            option.choices = choices;
+            option.choice_editable = editable.Value;
+            option.ChoicesReadable = true;
+        }
+
+        private static bool? ReadInputHidden(object control)
+        {
+            // WPF IsVisible and WinForms Visible include the parent's state.
+            // Only the input's own WPF Visibility proves it is a pure action.
+            object textBox = GetMemberValue(control, "m_textbox");
+            object visibility = GetMemberValue(textBox, "Visibility");
+            if (visibility == null || visibility.GetType().FullName != "System.Windows.Visibility")
+            {
+                return null;
+            }
+            string value = visibility.ToString();
+            return value == "Collapsed" || value == "Hidden";
         }
 
         private void ConfigureValueCapability(
@@ -614,6 +708,8 @@ namespace TrainerDeckBridge
                 return;
             }
 
+            option.ActionWithoutInput = option.kind == "action"
+                && (ReadInputHidden(control) ?? option.ActionWithoutInput);
             if (option.ActionWithoutInput)
             {
                 option.value = null;
@@ -629,7 +725,9 @@ namespace TrainerDeckBridge
             }
 
             InputWriteTarget target = FindInputWriteTarget(control);
-            string valueType = DetermineValueType(option, target);
+            string valueType = option.kind == "select"
+                ? "text"
+                : DetermineValueType(option, target);
             string applyMode = ValueApplyModeForKind(option.kind);
             if (string.Equals(applyMode, "invoke", StringComparison.Ordinal)
                 && !HasSupportedExecuteDelegate())
@@ -646,7 +744,8 @@ namespace TrainerDeckBridge
                 && target != null
                 && !string.Equals(valueType, "none", StringComparison.Ordinal)
                 && !string.Equals(applyMode, "none", StringComparison.Ordinal)
-                && IsCurrentValueCompatible(option.value, valueType);
+                && IsCurrentValueCompatible(option.value, valueType)
+                && (option.kind != "select" || option.ChoicesReadable);
         }
 
         private static string DetermineValueType(
@@ -1043,7 +1142,9 @@ namespace TrainerDeckBridge
                 invoked = true;
 
                 readback = ReadInputValue(control);
-                if (!ValuesEquivalent(
+                // The native callback may clear a deleted location's selection.
+                // The pre-invocation readback above has already verified our write.
+                if (option.kind != "select" && !ValuesEquivalent(
                         readback,
                         normalizedValue,
                         option.value_type))
@@ -1306,6 +1407,18 @@ namespace TrainerDeckBridge
             if (ContainsControlCharacters(value))
             {
                 return "value-has-control-characters";
+            }
+
+            if (option.kind == "select")
+            {
+                if (value.Length == 0 || value != value.Trim() || value.Length > MaxChoiceLength)
+                {
+                    return "invalid-choice-value";
+                }
+                if (!option.choice_editable && !option.choices.Contains(value))
+                {
+                    return "choice-unavailable";
+                }
             }
 
             if (string.Equals(
@@ -1687,17 +1800,14 @@ namespace TrainerDeckBridge
         {
             List<ControlBinding> controls = ReadOptionControls();
             MenuDefinitionSnapshot definition = ReadMenuDefinition();
-            bool mergeDefinition = definition != null
-                && definition.options != null
-                && definition.options.Count == controls.Count;
+            MenuDefinitionOption[] definitions = MatchDefinitions(controls, definition);
             for (int index = 0; index < controls.Count; index++)
             {
                 ControlBinding binding = controls[index];
                 string id = binding.OptionId;
-                if (FrameworkCompat.IsNullOrWhiteSpace(id) && mergeDefinition)
+                if (FrameworkCompat.IsNullOrWhiteSpace(id))
                 {
-                    MenuDefinitionOption defined =
-                        definition.options[index];
+                    MenuDefinitionOption defined = definitions[index];
                     if (defined != null)
                     {
                         id = defined.id;
@@ -2235,6 +2345,10 @@ namespace TrainerDeckBridge
 
         private static string DetermineKind(string typeName)
         {
+            if (string.Equals(typeName, "CheatOptionSetComboBox", StringComparison.Ordinal))
+            {
+                return "select";
+            }
             if (typeName.IndexOf(
                     "SetValue",
                     StringComparison.OrdinalIgnoreCase) >= 0)
@@ -2290,6 +2404,7 @@ namespace TrainerDeckBridge
         private static bool IsValueKind(string kind)
         {
             return string.Equals(kind, "action", StringComparison.Ordinal)
+                || string.Equals(kind, "select", StringComparison.Ordinal)
                 || string.Equals(kind, "input", StringComparison.Ordinal)
                 || string.Equals(
                     kind,
@@ -2304,6 +2419,7 @@ namespace TrainerDeckBridge
         private static string ValueApplyModeForKind(string kind)
         {
             if (string.Equals(kind, "action", StringComparison.Ordinal)
+                || string.Equals(kind, "select", StringComparison.Ordinal)
                 || string.Equals(kind, "input", StringComparison.Ordinal))
             {
                 return "invoke";

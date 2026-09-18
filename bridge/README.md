@@ -1,6 +1,6 @@
 # TrainerDeck FLiNG unified managed bridge
 
-This directory contains the Bridge 0.7.0 implementation bundled with TrainerDeck v0.7.0
+This directory contains the Bridge 0.7.1 implementation bundled with TrainerDeck v0.7.1
 for FLiNG's managed WPF and WinForms trainers. It does not send keyboard
 input and it preserves CheatDeck's hotkey and original-window workflows.
 
@@ -110,9 +110,23 @@ active.
 An `invoke` value first writes the managed control and then calls FLiNG's native
 delegate (including when the submitted value is unchanged). Its receipt is
 `status: "applied"`, `operation: "value"`, and `invoked: true`; the backend also
-requires the matching snapshot echo. With the two-string WPF ABI, that delegate
+requires a snapshot echo. With the two-string WPF ABI, that delegate
 is invoked as `ExecuteTrainerCommand(option.ID, "")`, and the native core reads
 the staged value through `TrainerCall_GetInputValue`.
+
+`<combobox>` controls publish `kind: "select"`, `value_type: "text"`,
+`value_apply_mode: "invoke"`, `choices`, and `choice_editable`. Choices and
+editability are read from the original WPF ComboBox on every snapshot, so shared
+location lists remain synchronized. Non-editable controls accept only current
+choices; editable controls also accept a new name. Names preserve their exact
+string identity (for example, `"01"` is not converted to `"1"`). Each list is
+limited to 128 names, each at most 200 characters, with no control characters.
+Unsupported item data disables value control for that option.
+
+Selection writes require an exact pre-invocation readback and the applied/invoked
+receipt plus a fresh snapshot. The selected value may change or clear after
+invocation because the native trainer can update or delete a saved location.
+Other value controls still require the requested value to echo in the snapshot.
 
 Button-only `<input_set>` controls (the exact tag or any tag carrying the
 `no_textbox` marker) publish `action_controllable: true` and no writable value.
@@ -120,6 +134,18 @@ An `action_command` is revision-CAS protected and calls the original trainer
 delegate on the UI thread. One-argument generations receive only the option ID;
 a confirmed two-string delegate receives the option ID and an empty `args`
 string. The bridge never invents or exposes an editable value for this case.
+If menu metadata cannot be parsed, the control's own WPF textbox `Visibility`
+also identifies a hidden input; parent-window visibility is not used. Unknown
+widget tags remain disabled rows without discarding known menu definitions.
+Definitions are associated with explicit control IDs, with positional fallback
+only for a complete list whose IDs do not contradict that alignment.
+
+Run `powershell -File tests/Test-BridgeSelections.ps1` after building to verify
+selection writes, dynamic lists, button-only actions, ID matching, and fallback
+behavior against a WPF fixture. Optional `-UiAssembly`, `-ChineseMenu`, and
+`-EnglishMenu` paths run the same checks against a locally extracted Dawnwalker
+UI assembly and its original menu resources. These tests substitute the native
+command delegate and do not verify game-memory effects.
 
 ## Framed JSON protocol
 
@@ -140,7 +166,7 @@ revision. The transport is deliberately plain TCP because it is restricted to
 Bridge to backend:
 
 ```json
-{"type":"hello","protocol":1,"token":"...","app_id":2072450,"session_id":"0123456789abcdef0123456789abcdef","trainer_sha256":"...","ui_fingerprint":"...","bridge_version":"0.7.0","capabilities":["toggle_command_v1","action_command_v1","value_snapshot_v1","value_command_v1","value_command_receipt_v1","trainer_window_visible_v1","auto_return_confirmation_v1","localized_widget_fallback_v1","nonblocking_ui_commands_v1","independent_heartbeat_v1"]}
+{"type":"hello","protocol":1,"token":"...","app_id":2072450,"session_id":"0123456789abcdef0123456789abcdef","trainer_sha256":"...","ui_fingerprint":"...","bridge_version":"0.7.1","capabilities":["toggle_command_v1","action_command_v1","value_snapshot_v1","value_command_v1","value_command_receipt_v1","trainer_window_visible_v1","auto_return_confirmation_v1","localized_widget_fallback_v1","nonblocking_ui_commands_v1","independent_heartbeat_v1"]}
 {"type":"snapshot","token":"...","session_id":"0123456789abcdef0123456789abcdef","revision":1,"game_available":true,"options":[{"id":"N1","kind":"toggle_with_input_adjustment","labels":{"zh_cn":"游戏速度","zh_tw":"遊戲速度","en":"Game Speed"},"tooltips":{},"group":{},"tooltip_style":"normal","active":false,"controllable":true,"value":"1.0","value_controllable":true,"value_type":"number","value_apply_mode":"stage_then_toggle","minimum":0.5,"maximum":10.0,"step":0.5}]}
 {"type":"command_accepted","token":"...","session_id":"0123456789abcdef0123456789abcdef","request_id":"42","status":"queued"}
 {"type":"command_accepted","token":"...","session_id":"0123456789abcdef0123456789abcdef","request_id":"43","status":"staged","operation":"value","value":"1.5","invoked":false}

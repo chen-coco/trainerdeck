@@ -51,7 +51,7 @@ class BridgeWindowPolicyTests(unittest.TestCase):
             self.protocol_source,
         )
         self.assertIn(
-            'message["bridge_version"] = "0.7.0";',
+            'message["bridge_version"] = "0.7.1";',
             self.protocol_source,
         )
         self.assertIn(

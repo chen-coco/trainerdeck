@@ -21,6 +21,7 @@ namespace TrainerDeckBridge
             labels = new Dictionary<string, string>();
             tooltips = new Dictionary<string, string>();
             group = new Dictionary<string, string>();
+            choices = new List<string>();
             value_type = "none";
             value_apply_mode = "none";
         }
@@ -51,6 +52,10 @@ namespace TrainerDeckBridge
 
         public string value_apply_mode { get; set; }
 
+        public List<string> choices { get; set; }
+
+        public bool choice_editable { get; set; }
+
         public double? minimum { get; set; }
 
         public double? maximum { get; set; }
@@ -62,6 +67,8 @@ namespace TrainerDeckBridge
         internal bool HasReadableInputValue { get; set; }
 
         internal bool ActionWithoutInput { get; set; }
+
+        internal bool ChoicesReadable { get; set; }
     }
 
     internal sealed class CommandResult
@@ -93,7 +100,7 @@ namespace TrainerDeckBridge
             message["session_id"] = sessionId;
             message["trainer_sha256"] = trainerSha256 ?? string.Empty;
             message["ui_fingerprint"] = uiFingerprint ?? string.Empty;
-            message["bridge_version"] = "0.7.0";
+            message["bridge_version"] = "0.7.1";
             message["state_authority"] = "core_callback";
             message["value_state_authority"] = "ui_control_readback";
             message["capabilities"] = new[]

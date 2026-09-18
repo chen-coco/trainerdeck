@@ -192,7 +192,8 @@ namespace TrainerDeckBridge
 
                 MenuDefinitionOption option = new MenuDefinitionOption();
                 option.id = id;
-                option.kind = chineseOption.widget.kind;
+                option.kind = englishOption.widget.kind == "unknown"
+                    ? "unknown" : chineseOption.widget.kind;
                 option.labels = CreateLocalizedDictionary(
                     chineseOption.text.label,
                     englishOption.text.label);
@@ -606,6 +607,14 @@ namespace TrainerDeckBridge
                 ? string.Empty
                 : opening.Substring(separator).Trim();
             string kind = KindForTag(tagName, lineNumber, language);
+            if (kind == "unknown")
+            {
+                // Keep this row's identity and position without guessing its
+                // semantics. Other supported rows must still be parsed.
+                return new ParsedWidget(
+                    "unknown", label, null, null, null, null,
+                    "none", "none", false, true);
+            }
             Dictionary<string, string> attributes = ParseAttributes(
                 attributesText,
                 lineNumber,
@@ -679,7 +688,9 @@ namespace TrainerDeckBridge
                     || body.IndexOf(
                         "no_textbox",
                         StringComparison.Ordinal) >= 0);
-            string valueType = actionWithoutInput
+            string valueType = kind == "select"
+                ? "text"
+                : actionWithoutInput
                 ? "none"
                 : DetermineWidgetValueType(
                     tagName,
@@ -769,7 +780,8 @@ namespace TrainerDeckBridge
         private static string ValueApplyModeForKind(string kind)
         {
             if (string.Equals(kind, "action", StringComparison.Ordinal)
-                || string.Equals(kind, "input", StringComparison.Ordinal))
+                || string.Equals(kind, "input", StringComparison.Ordinal)
+                || string.Equals(kind, "select", StringComparison.Ordinal))
             {
                 return "invoke";
             }
@@ -804,6 +816,10 @@ namespace TrainerDeckBridge
             int lineNumber,
             string language)
         {
+            if (string.Equals(tagName, "combobox", StringComparison.OrdinalIgnoreCase))
+            {
+                return "select";
+            }
             if (string.Equals(
                     tagName,
                     "input",
@@ -830,10 +846,7 @@ namespace TrainerDeckBridge
                 return "toggle_with_input_adjustment";
             }
 
-            throw LineError(
-                lineNumber,
-                language + " menu contains unknown widget <"
-                    + tagName + ">.");
+            return "unknown";
         }
 
         private static Dictionary<string, string> ParseAttributes(
@@ -891,7 +904,8 @@ namespace TrainerDeckBridge
                     if (!string.Equals(
                             name,
                             "no_textbox",
-                            StringComparison.Ordinal))
+                            StringComparison.Ordinal)
+                        && !string.Equals(name, "group_owner", StringComparison.Ordinal))
                     {
                         throw LineError(
                             lineNumber,
@@ -959,6 +973,8 @@ namespace TrainerDeckBridge
         private static bool IsKnownAttribute(string name)
         {
             return string.Equals(name, "default", StringComparison.Ordinal)
+                || string.Equals(name, "group", StringComparison.Ordinal)
+                || string.Equals(name, "group_owner", StringComparison.Ordinal)
                 || string.Equals(name, "min", StringComparison.Ordinal)
                 || string.Equals(name, "max", StringComparison.Ordinal)
                 || string.Equals(name, "step", StringComparison.Ordinal)
@@ -1141,6 +1157,11 @@ namespace TrainerDeckBridge
             // plain toggle placeholder, so none of its widget fields are
             // comparable.
             if (!english.widget.hasWidget)
+            {
+                return;
+            }
+
+            if (chinese.widget.kind == "unknown" || english.widget.kind == "unknown")
             {
                 return;
             }

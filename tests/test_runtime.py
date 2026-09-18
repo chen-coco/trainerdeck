@@ -132,6 +132,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         minimum=None,
         maximum=None,
         step=None,
+        choices=None,
+        choice_editable=False,
     ):
         option = {
             "id": "N1",
@@ -158,6 +160,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         }
         if value is not None:
             option["value"] = value
+        if choices is not None:
+            option["choices"] = choices
+            option["choice_editable"] = choice_editable
         if minimum is not None:
             option["minimum"] = minimum
         if maximum is not None:
@@ -1567,6 +1572,105 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "5",
                 revision,
             )
+        writer.close()
+        await writer.wait_closed()
+
+    def test_selection_metadata_preserves_text_and_rejects_invalid_lists(self):
+        base = {
+            "id": "select", "kind": "select", "value": "01",
+            "value_controllable": True, "value_type": "text",
+            "value_apply_mode": "invoke", "choices": ["1", "01", "山谷营地"],
+            "choice_editable": False,
+        }
+        option = _sanitize_option(base)
+        self.assertEqual(option["choices"], ["1", "01", "山谷营地"])
+        self.assertTrue(option["value_controllable"])
+        self.assertFalse(option["controllable"])
+        for update in (
+            {"choices": "1"}, {"choices": ["bad\x00name"]},
+            {"choices": [" leading"]}, {"choices": ["x" * 201]},
+            {"choices": [str(i) for i in range(129)]},
+            {"choice_editable": "false"}, {"value_type": "number"},
+        ):
+            with self.subTest(update=update):
+                self.assertFalse(_sanitize_option({**base, **update})["value_controllable"])
+
+    async def test_selection_command_validates_choices_and_waits_for_fresh_snapshot(self):
+        session_id = "session-selections"
+        reader, writer = await self.connect_bridge(session_id=session_id)
+        await _read_frame(reader)
+        await self.publish_menu(
+            writer, session_id, 1, False, kind="select", value="1",
+            value_controllable=True, value_type="text", value_apply_mode="invoke",
+            choices=["1", "01", "山谷营地"],
+        )
+        await self.wait_until(lambda: bool(self.manager.get_snapshot(1234)["options"]))
+        snapshot = self.manager.get_snapshot(1234)
+        with self.assertRaisesRegex(TrainerRuntimeError, "请选择列表中的位置"):
+            await self.manager.set_option_value(1234, session_id, "N1", "不存在", "1", snapshot["revision"])
+        task = asyncio.create_task(self.manager.set_option_value(
+            1234, session_id, "N1", "01", "1", snapshot["revision"],
+        ))
+        command = await _read_frame(reader)
+        self.assertEqual(command["value"], "01")
+        self.assertEqual(command["type"], "value_command")
+        receipt = {
+            "type": "command_accepted", "session_id": session_id,
+            "request_id": command["request_id"], "operation": "value",
+            "status": "applied", "invoked": True,
+        }
+        await _write_frame(writer, receipt)
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done(), "receipt alone must not finish the request")
+        await self.publish_menu(
+            writer, session_id, 2, False, kind="select", value="01",
+            value_controllable=True, value_type="text", value_apply_mode="invoke",
+            choices=["1", "01", "山谷营地", "城门"],
+        )
+        confirmed = await asyncio.wait_for(task, 1)
+        self.assertEqual(confirmed["options"][0]["value"], "01")
+        self.assertIn("城门", confirmed["options"][0]["choices"])
+        self.assertFalse(confirmed["options"][0]["value_pending"])
+        writer.close()
+        await writer.wait_closed()
+
+    async def test_editable_selection_can_clear_after_native_action(self):
+        session_id = "session-delete-location"
+        reader, writer = await self.connect_bridge(session_id=session_id)
+        await _read_frame(reader)
+        await self.publish_menu(
+            writer, session_id, 1, False, kind="select", value="营地",
+            value_controllable=True, value_type="text", value_apply_mode="invoke",
+            choices=["营地", "城门"], choice_editable=True,
+        )
+        await self.wait_until(lambda: bool(self.manager.get_snapshot(1234)["options"]))
+        snapshot = self.manager.get_snapshot(1234)
+        task = asyncio.create_task(self.manager.set_option_value(
+            1234, session_id, "N1", "营地!!", "营地", snapshot["revision"],
+        ))
+        command = await _read_frame(reader)
+        await self.publish_menu(
+            writer, session_id, 2, False, kind="select", value="",
+            value_controllable=True, value_type="text", value_apply_mode="invoke",
+            choices=["城门"], choice_editable=True,
+        )
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done(), "updated list alone must not confirm execution")
+        await _write_frame(writer, {
+            "type": "command_accepted", "session_id": session_id,
+            "request_id": command["request_id"], "operation": "value",
+            "status": "staged", "invoked": False,
+        })
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done(), "a staged write is not an applied selection")
+        await _write_frame(writer, {
+            "type": "command_accepted", "session_id": session_id,
+            "request_id": command["request_id"], "operation": "value",
+            "status": "applied", "invoked": True,
+        })
+        confirmed = await asyncio.wait_for(task, 1)
+        self.assertFalse(confirmed["options"][0]["value_pending"])
+        self.assertEqual(confirmed["options"][0]["choices"], ["城门"])
         writer.close()
         await writer.wait_closed()
 

@@ -15,7 +15,7 @@ TrainerDeck is a Decky Loader plugin for Steam Deck Game Mode. It can identify t
 - Automatically displays the plugin menu in Chinese or English based on the SteamOS system language; other system languages default to English.
 - Searches for FLiNG trainers in Chinese or English; automatic search and setup for the current game can be enabled separately.
 - Binds a trainer to the corresponding Steam library entry and adds CheatDeck-compatible launch options.
-- Provides a Decky control panel for newer FLiNG trainers released in 2019 or later, including toggles, numeric inputs, and one-shot actions.
+- Provides a Decky control panel for newer FLiNG trainers released in 2019 or later, including toggles, numeric inputs, dropdowns, and one-shot actions.
 - Provides one-click launch-option recovery without deleting downloaded trainer files.
 
 ## How It Works
@@ -58,6 +58,8 @@ two launch entries cannot overwrite the same manifest.
 Do not use the automatically generated GitHub “Source code” archives as plugin installation packages.
 
 ## Basic Usage
+
+Version 0.7.1 fixes the location controls in The Blood of Dawnwalker. Save and teleport controls display dropdowns; editable dropdowns offer “New location…” for entering a name. Added or removed locations synchronize from the original trainer, and “Teleport to Waypoint” displays only an Apply button. Quit and restart the game and trainer after upgrading to load the new Bridge.
 
 1. Start the target game, then open `…` → Decky → TrainerDeck.
 2. Confirm the detected game name and select “Search.” You can also enter part of a Chinese title or an English game name manually.
@@ -128,7 +130,7 @@ pnpm run package
 release/TrainerDeck-<version>.zip
 ```
 
-The current version produces `release/TrainerDeck-0.7.0.zip`.
+The current version produces `release/TrainerDeck-0.7.1.zip`.
 
 `TrainerDeckBridgeLauncher.exe` embeds both CLR2 and CLR4 Bridge payloads. At
 runtime it selects the payload whose metadata generation exactly matches the
