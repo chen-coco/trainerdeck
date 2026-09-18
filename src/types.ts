@@ -122,6 +122,7 @@ export type TrainerRuntimeOptionKind =
   | "toggle_with_input_adjustment"
   | "action"
   | "input"
+  | "select"
   | "unknown";
 
 export interface TrainerRuntimeOption {
@@ -146,6 +147,8 @@ export interface TrainerRuntimeOption {
   action_pending: boolean;
   action_error: string;
   value?: string;
+  choices?: string[];
+  choice_editable?: boolean;
   minimum?: number;
   maximum?: number;
   step?: number;

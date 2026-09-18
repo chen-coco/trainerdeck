@@ -49,8 +49,8 @@ class BridgeRuntimeSelectionTests(unittest.TestCase):
             launcher_root.findtext(".//TargetFramework"),
             "net462",
         )
-        self.assertEqual(bridge_root.findtext(".//Version"), "0.7.0")
-        self.assertEqual(launcher_root.findtext(".//Version"), "0.7.0")
+        self.assertEqual(bridge_root.findtext(".//Version"), "0.7.1")
+        self.assertEqual(launcher_root.findtext(".//Version"), "0.7.1")
 
     def test_launcher_embeds_both_runtime_payload_build_outputs(self):
         launcher_root = ElementTree.parse(self.launcher_project).getroot()

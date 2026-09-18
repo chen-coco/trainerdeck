@@ -53,10 +53,12 @@ VALUE_CONTROLLABLE_KINDS = {
     "toggle_with_input_adjustment",
     "action",
     "input",
+    "select",
 }
 OPTION_KINDS = CONTROLLABLE_KINDS | {
     "action",
     "input",
+    "select",
     "unknown",
 }
 
@@ -183,7 +185,7 @@ def _sanitize_option(raw: Any) -> dict[str, Any] | None:
         kind in {"toggle_with_input", "toggle_with_input_adjustment"}
         and value_apply_mode == "stage_then_toggle"
     ) or (
-        kind in {"action", "input"}
+        kind in {"action", "input", "select"}
         and value_apply_mode == "invoke"
     )
     value_controllable = (
@@ -198,6 +200,26 @@ def _sanitize_option(raw: Any) -> dict[str, Any] | None:
         and value_type == "none"
         and value_apply_mode == "none"
     )
+    choices: list[str] = []
+    choice_editable = False
+    if kind == "select":
+        raw_choices = raw.get("choices")
+        choices_valid = (
+            isinstance(raw_choices, list)
+            and len(raw_choices) <= 128
+            and isinstance(raw.get("choice_editable"), bool)
+            and all(
+                isinstance(choice, str)
+                and 0 < len(choice) <= 200
+                and choice == choice.strip()
+                and not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in choice)
+                for choice in raw_choices
+            )
+        )
+        if choices_valid:
+            choices = list(dict.fromkeys(raw_choices))
+            choice_editable = raw["choice_editable"]
+        value_controllable = value_controllable and choices_valid and value_type == "text"
     if value_controllable and action_controllable:
         # A control cannot be both a value-bearing input_set action and a pure
         # no-input action. Treat a contradictory bridge contract as unsupported.
@@ -229,6 +251,9 @@ def _sanitize_option(raw: Any) -> dict[str, Any] | None:
         "action_pending": False,
         "action_error": "",
     }
+    if kind == "select":
+        option["choices"] = choices
+        option["choice_editable"] = choice_editable
     value = _safe_text(raw.get("value"), 200)
     if value:
         option["value"] = value
@@ -1242,6 +1267,11 @@ class TrainerRuntimeManager:
             return False
 
         if phase == "writing_value":
+            # A choice action can update its own selection/list (for example,
+            # deleting a saved location). Confirm invocation plus a fresh
+            # snapshot, rather than waiting for the old selection to reappear.
+            if request.get("kind") == "select" and option.get("kind") == "select":
+                request["value_snapshot_confirmed"] = True
             if (
                 option.get("value_type") == "text"
                 and option.get("value") == request["value"]
@@ -1583,6 +1613,12 @@ class TrainerRuntimeManager:
         if not option.get("value_controllable"):
             raise TrainerRuntimeError("这个修改项尚不支持写入数值")
         if (
+            option.get("kind") == "select"
+            and not option.get("choice_editable")
+            and desired_value not in option.get("choices", [])
+        ):
+            raise TrainerRuntimeError("请选择列表中的位置")
+        if (
             option.get("value_pending")
             or option.get("pending")
             or option.get("action_pending")
@@ -1652,6 +1688,7 @@ class TrainerRuntimeManager:
             "option_id": option_id,
             "operation": "value",
             "value": desired_value,
+            "kind": option["kind"],
             "expected_value": current_value,
             "apply_mode": apply_mode,
             "phase": phase,
