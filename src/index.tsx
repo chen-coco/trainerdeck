@@ -236,7 +236,6 @@ function RuntimeOptionRow({
   const [hovered, setHovered] = useState(false);
   const [tooltipPinned, setTooltipPinned] = useState(false);
   const [validationError, setValidationError] = useState("");
-  const [editingChoice, setEditingChoice] = useState(false);
   const valueWasPending = useRef(false);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const label = localizedTrainerText(option.labels) || option.id;
@@ -246,7 +245,6 @@ function RuntimeOptionRow({
   const hasSelect = option.kind === "select";
   const choices = option.choices ?? [];
   const editableChoice = hasSelect && option.choice_editable === true;
-  const customChoice = editableChoice && (editingChoice || !choices.includes(draft));
   const hasAction = option.action_controllable && !hasToggle && !hasValue;
   const valueIsNumeric = option.value_type !== "text";
   const rowDisabled =
@@ -271,7 +269,6 @@ function RuntimeOptionRow({
     if (!dirty || draft === (option.value ?? "") || selectionApplied) {
       setDraft(option.value ?? "");
       setDirty(false);
-      setEditingChoice(false);
       setValidationError("");
     }
   }, [dirty, draft, hasSelect, option.value, option.value_pending, option.value_error]);
@@ -446,31 +443,26 @@ function RuntimeOptionRow({
               gridTemplateColumns: "minmax(0, 1fr) auto",
             }}
           >
-            <div style={{ minWidth: 0 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "7px", minWidth: 0 }}>
               {hasSelect && (
                 <Dropdown
-                  rgOptions={[
-                    ...choices.map((value) => ({ data: value, label: value })),
-                    ...(editableChoice
-                      ? [{ data: null, label: t("新建位置…", "New location…") }]
-                      : []),
-                  ]}
-                  selectedOption={customChoice ? null : draft}
-                  strDefaultLabel={t("选择已保存的位置", "Select a saved location")}
+                  rgOptions={choices.map((value) => ({ data: value, label: value }))}
+                  selectedOption={choices.includes(draft) ? draft : undefined}
+                  strDefaultLabel={t("选择已有值", "Select an existing value")}
                   menuLabel={label}
-                  disabled={rowDisabled || !hasValue || (!editableChoice && choices.length === 0)}
+                  disabled={rowDisabled || !hasValue || choices.length === 0}
                   onChange={({ data }) => {
-                    setEditingChoice(data === null);
-                    setDraft(typeof data === "string" ? data : "");
+                    if (typeof data !== "string") return;
+                    setDraft(data);
                     setDirty(true);
                     setValidationError("");
                   }}
                 />
               )}
-              {(!hasSelect || customChoice) && (
+              {(!hasSelect || editableChoice) && (
                 <TextField
                   label={hasSelect
-                    ? t("位置名称", "Location name")
+                    ? t("输入值", "Value")
                     : hasToggle ? t("数值", "Value") : undefined}
                   description={rangeDescription || undefined}
                   value={draft}

@@ -11,7 +11,7 @@ using System.Windows.Controls;
 // downloaded trainer. An optional UI assembly runs the same checks on FLiNG.
 internal sealed class TestCombo
 {
-    public ComboBox m_box = new ComboBox();
+    public ComboBox m_box = new ComboBox { IsEditable = true };
 }
 internal sealed class CheatOptionSetComboBox : UserControl
 {
@@ -67,8 +67,8 @@ internal static class BridgeSelectionHarness
             object marker = Create(ui, false, "teleport_to_waypoint");
             ComboBox saveBox = (ComboBox)Get(Get(save, "m_combobox"), "m_box");
             ComboBox teleportBox = (ComboBox)Get(Get(teleport, "m_combobox"), "m_box");
-            saveBox.IsEditable = true;
-            teleportBox.IsEditable = false;
+            Check(saveBox.IsEditable && !saveBox.IsReadOnly, "original save dropdown accepts typed input");
+            Check(teleportBox.IsEditable && !teleportBox.IsReadOnly, "original teleport dropdown accepts typed input");
             foreach (ComboBox box in new[] { saveBox, teleportBox })
             {
                 box.Items.Add("1");
@@ -124,8 +124,12 @@ internal static class BridgeSelectionHarness
             Check((string)Get(result, "status") == "applied" && calls == 2 && invokedValue == "山谷营地", "select and teleport");
             result = Call(reader, "ExecuteValueOnUiThread", "teleport", "山谷营地", "山谷营地");
             Check((string)Get(result, "status") == "applied" && calls == 3, "unchanged selection still invokes");
+            // Exercise a genuinely selection-only control separately, without
+            // overriding the original trainer's editable defaults above.
+            teleportBox.IsEditable = false;
             result = Call(reader, "ExecuteValueOnUiThread", "teleport", "不存在的位置", "山谷营地");
             Check((string)Get(result, "error") == "choice-unavailable" && calls == 3, "reject unlisted read-only selection");
+            teleportBox.IsEditable = true;
             Call(teleport, "SetInputValue", "2");
             result = Call(reader, "ExecuteValueOnUiThread", "teleport", "1", "山谷营地");
             Check((string)Get(result, "error") == "expected-value-changed" && calls == 3, "reject stale selection");
@@ -137,6 +141,11 @@ internal static class BridgeSelectionHarness
             Check((string)Call(save, "GetInputValue") == "" && !saveBox.Items.Contains("山谷营地"), "deletion is not rolled back");
             snapshot = Call(reader, "Capture");
             Check(!((IList)Get(Option(snapshot, "teleport"), "choices")).Contains("山谷营地"), "removed choices are republished");
+
+            result = Call(reader, "ExecuteValueOnUiThread", "teleport", "12", "2");
+            Check((string)Get(result, "status") == "applied" && calls == 6 && invokedValue == "12", "editable teleport accepts a typed number outside the list");
+            result = Call(reader, "ExecuteValueOnUiThread", "teleport", "0012", "12");
+            Check((string)Get(result, "status") == "applied" && calls == 7 && invokedValue == "0012", "typed numeric names preserve leading zeros");
 
             window.m_cheat_options_area.Children.Clear();
             foreach (object control in new[] { marker, save, teleport }) window.m_cheat_options_area.Children.Add((UIElement)control);
@@ -154,7 +163,7 @@ internal static class BridgeSelectionHarness
             CheckMenu(reader); // Real visibility and combo reflection survive parse failure.
             window.IsGameRunning = false;
             result = Call(reader, "ExecuteActionOnUiThread", "teleport_to_waypoint");
-            Check((string)Get(result, "error") == "game-not-running" && calls == 5, "missing game still rejects actions");
+            Check((string)Get(result, "error") == "game-not-running" && calls == 7, "missing game still rejects actions");
             app.Shutdown();
             Console.WriteLine("PASS " + checks + " selection/visibility/command checks; " + (ui == null ? "WPF fixture" : ui.FullName));
             return 0;
@@ -175,6 +184,7 @@ internal static class BridgeSelectionHarness
             Check((string)Get(option, "kind") == "select", id + " remains a select");
             Check((bool)Get(option, "value_controllable") && !(bool)Get(option, "action_controllable"), id + " supports a choice action");
             Check((string)Get(option, "value_type") == "text", id + " keeps text names");
+            Check((bool)Get(option, "choice_editable"), id + " retains original editable behavior");
         }
         object marker = Option(snapshot, "teleport_to_waypoint");
         Check((bool)Get(marker, "action_controllable") && !(bool)Get(marker, "value_controllable"), "marker remains a pure action");

@@ -15,6 +15,8 @@ const compiled = ts.transpileModule(rowSource + "\nexports.Row = RuntimeOptionRo
 function rowHarness(option) {
   const slots = [];
   let cursor = 0;
+  let changed = false;
+  let effects = [];
   const emitted = [];
   const jsx = (type, props) => ({ type, props: props || {} });
   const context = {
@@ -22,14 +24,24 @@ function rowHarness(option) {
     useState(initial) {
       const index = cursor++;
       if (!(index in slots)) slots[index] = initial;
-      return [slots[index], (value) => { slots[index] = typeof value === "function" ? value(slots[index]) : value; }];
+      return [slots[index], (value) => {
+        const next = typeof value === "function" ? value(slots[index]) : value;
+        if (!Object.is(slots[index], next)) { slots[index] = next; changed = true; }
+      }];
     },
     useRef(initial) {
       const index = cursor++;
       if (!(index in slots)) slots[index] = { current: initial };
       return slots[index];
     },
-    useEffect() {}, // These checks cover rendering and user events, not scheduling.
+    useEffect(effect, dependencies) {
+      const index = cursor++;
+      const previous = slots[index];
+      if (!previous || dependencies.some((value, offset) => !Object.is(value, previous[offset]))) {
+        slots[index] = dependencies;
+        effects.push(effect);
+      }
+    },
     t: (zh) => zh,
     localizedTrainerText: (value) => value?.zh_cn || value?.en || "",
   };
@@ -38,9 +50,20 @@ function rowHarness(option) {
   vm.runInNewContext(compiled, context);
   return {
     emitted,
-    render() {
-      cursor = 0;
-      const tree = context.exports.Row({ option, disabled: false, connected: true, gameAvailable: true, onToggle() {}, onAction() { emitted.push("action"); }, onValue(value) { emitted.push(value); } });
+    render(update) {
+      option = { ...option, ...update };
+      let tree;
+      // Flush state synchronization effects so a field disappearing during
+      // typing cannot be hidden by a render-only hook stub.
+      for (let pass = 0; ; pass++) {
+        assert.ok(pass < 20, "row effects must settle");
+        cursor = 0;
+        changed = false;
+        effects = [];
+        tree = context.exports.Row({ option, disabled: false, connected: true, gameAvailable: true, onToggle() {}, onAction() { emitted.push("action"); }, onValue(value) { emitted.push(value); } });
+        for (const effect of effects) effect();
+        if (!changed) break;
+      }
       const nodes = [];
       function visit(value) {
         if (Array.isArray(value)) return value.forEach(visit);
@@ -61,25 +84,60 @@ const base = {
 const save = rowHarness(base);
 let nodes = save.render();
 assert.equal(nodes("Dropdown").length, 1);
-assert.equal(nodes("TextField").length, 0, "existing selection needs only a dropdown");
+assert.equal(nodes("TextField").length, 1, "an editable dropdown must always offer direct input");
+assert.equal(nodes("TextField")[0].props.value, "1");
+assert.equal(nodes("TextField")[0].props.mustBeNumeric, false);
 const items = nodes("Dropdown")[0].props.rgOptions;
 assert.equal(items[1].data, "01", "names must keep leading zeros");
-assert.equal(items[3].data, null, "new-location entry cannot collide with a string name");
-nodes("Dropdown")[0].props.onChange({ data: null });
+assert.equal(items.length, 3, "dropdown contains the trainer's choices without an editing-mode entry");
+nodes("TextField")[0].props.onChange({ currentTarget: { value: "" } });
 nodes = save.render();
-assert.equal(nodes("TextField").length, 1);
-assert.equal(nodes("TextField")[0].props.mustBeNumeric, false);
+assert.equal(nodes("TextField").length, 1, "clearing the field must keep it mounted");
 nodes("DialogButton")[0].props.onClick();
 assert.deepEqual(save.emitted, [], "empty location names must not execute");
+nodes("TextField")[0].props.onChange({ currentTarget: { value: "1" } });
+nodes = save.render();
+assert.equal(nodes("TextField").length, 1, "matching the current value must not close the input mid-typing");
+nodes("TextField")[0].props.onChange({ currentTarget: { value: "12" } });
+nodes = save.render();
+assert.equal(nodes("TextField")[0].props.value, "12");
+assert.equal(nodes("Dropdown")[0].props.selectedOption, undefined);
+nodes("DialogButton")[0].props.onClick();
+assert.deepEqual(save.emitted, ["12"], "a typed number outside the list must execute");
+nodes = save.render({ value_pending: true });
+assert.equal(nodes("TextField")[0].props.disabled, true);
+nodes = save.render({ value_pending: false, value: "12", choices: [...base.choices, "12"] });
+assert.equal(nodes("TextField").length, 1, "applying a newly listed value must retain direct input");
+assert.equal(nodes("Dropdown")[0].props.selectedOption, "12");
 nodes("TextField")[0].props.onChange({ currentTarget: { value: "山谷营地" } });
 nodes = save.render();
 nodes("DialogButton")[0].props.onClick();
-assert.deepEqual(save.emitted, ["山谷营地"]);
+assert.deepEqual(save.emitted, ["12", "山谷营地"]);
 nodes("Dropdown")[0].props.onChange({ data: "01" });
 nodes = save.render();
-assert.equal(nodes("TextField").length, 0);
+assert.equal(nodes("TextField")[0].props.value, "01", "selecting an option updates the editable value");
 nodes("DialogButton")[0].props.onClick();
-assert.deepEqual(save.emitted, ["山谷营地", "01"]);
+assert.deepEqual(save.emitted, ["12", "山谷营地", "01"]);
+nodes("TextField")[0].props.onChange({ currentTarget: { value: "0012" } });
+nodes = save.render({ value: "2", choices: ["2", "01"] });
+assert.equal(nodes("TextField")[0].props.value, "0012", "snapshot refreshes must preserve an unfinished edit");
+nodes("DialogButton")[0].props.onClick();
+assert.deepEqual(save.emitted, ["12", "山谷营地", "01", "0012"]);
+nodes = save.render({ value_pending: true });
+nodes = save.render({ value_pending: false, value: "", value_error: "" });
+assert.equal(nodes("TextField").length, 1, "native selection resets must keep the input available");
+assert.equal(nodes("TextField")[0].props.value, "");
+
+const editableTeleport = rowHarness({ ...base, id: "teleport", labels: { zh_cn: "瞬间转移" }, value: "", choices: [] });
+nodes = editableTeleport.render();
+assert.equal(nodes("Dropdown")[0].props.disabled, true);
+assert.equal(nodes("TextField")[0].props.disabled, false, "an empty choice list must not block direct input");
+nodes("TextField")[0].props.onChange({ currentTarget: { value: "007" } });
+nodes = editableTeleport.render();
+let preventedEnter = false;
+nodes("TextField")[0].props.onKeyDown({ key: "Enter", preventDefault() { preventedEnter = true; } });
+assert.equal(preventedEnter, true);
+assert.deepEqual(editableTeleport.emitted, ["007"]);
 
 const teleport = rowHarness({ ...base, choice_editable: false });
 nodes = teleport.render();
