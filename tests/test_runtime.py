@@ -1634,6 +1634,40 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await writer.wait_closed()
 
+    async def test_editable_selection_accepts_typed_number_outside_choices(self):
+        session_id = "session-typed-selection"
+        reader, writer = await self.connect_bridge(session_id=session_id)
+        await _read_frame(reader)
+        await self.publish_menu(
+            writer, session_id, 1, False, kind="select", value="1",
+            value_controllable=True, value_type="text", value_apply_mode="invoke",
+            choices=["1", "2"], choice_editable=True,
+        )
+        await self.wait_until(lambda: bool(self.manager.get_snapshot(1234)["options"]))
+        snapshot = self.manager.get_snapshot(1234)
+        task = asyncio.create_task(self.manager.set_option_value(
+            1234, session_id, "N1", "0012", "1", snapshot["revision"],
+        ))
+        command = await _read_frame(reader)
+        self.assertEqual(command["type"], "value_command")
+        self.assertEqual(command["value"], "0012")
+        self.assertEqual(command["expected_value"], "1")
+        await _write_frame(writer, {
+            "type": "command_accepted", "session_id": session_id,
+            "request_id": command["request_id"], "operation": "value",
+            "status": "applied", "invoked": True,
+        })
+        await self.publish_menu(
+            writer, session_id, 2, False, kind="select", value="0012",
+            value_controllable=True, value_type="text", value_apply_mode="invoke",
+            choices=["1", "2"], choice_editable=True,
+        )
+        confirmed = await asyncio.wait_for(task, 1)
+        self.assertEqual(confirmed["options"][0]["value"], "0012")
+        self.assertFalse(confirmed["options"][0]["value_pending"])
+        writer.close()
+        await writer.wait_closed()
+
     async def test_editable_selection_can_clear_after_native_action(self):
         session_id = "session-delete-location"
         reader, writer = await self.connect_bridge(session_id=session_id)

@@ -1,6 +1,6 @@
 # TrainerDeck FLiNG unified managed bridge
 
-This directory contains the Bridge 0.7.1 implementation bundled with TrainerDeck v0.7.1
+This directory contains the Bridge 0.7.2 implementation bundled with TrainerDeck v0.7.2
 for FLiNG's managed WPF and WinForms trainers. It does not send keyboard
 input and it preserves CheatDeck's hotkey and original-window workflows.
 
@@ -123,6 +123,13 @@ string identity (for example, `"01"` is not converted to `"1"`). Each list is
 limited to 128 names, each at most 200 characters, with no control characters.
 Unsupported item data disables value control for that option.
 
+Editable dropdowns display an input field alongside the list at all times. Both
+Save Location and Teleport in Dawnwalker's original UI are editable; regression
+checks preserve and verify those defaults before testing a selection-only
+control separately. Typing a current or newly listed value must never unmount
+the input field. Frontend regression tests flush state synchronization effects
+to cover consecutive digits, snapshot refreshes, and native selection resets.
+
 Selection writes require an exact pre-invocation readback and the applied/invoked
 receipt plus a fresh snapshot. The selected value may change or clear after
 invocation because the native trainer can update or delete a saved location.
@@ -166,7 +173,7 @@ revision. The transport is deliberately plain TCP because it is restricted to
 Bridge to backend:
 
 ```json
-{"type":"hello","protocol":1,"token":"...","app_id":2072450,"session_id":"0123456789abcdef0123456789abcdef","trainer_sha256":"...","ui_fingerprint":"...","bridge_version":"0.7.1","capabilities":["toggle_command_v1","action_command_v1","value_snapshot_v1","value_command_v1","value_command_receipt_v1","trainer_window_visible_v1","auto_return_confirmation_v1","localized_widget_fallback_v1","nonblocking_ui_commands_v1","independent_heartbeat_v1"]}
+{"type":"hello","protocol":1,"token":"...","app_id":2072450,"session_id":"0123456789abcdef0123456789abcdef","trainer_sha256":"...","ui_fingerprint":"...","bridge_version":"0.7.2","capabilities":["toggle_command_v1","action_command_v1","value_snapshot_v1","value_command_v1","value_command_receipt_v1","trainer_window_visible_v1","auto_return_confirmation_v1","localized_widget_fallback_v1","nonblocking_ui_commands_v1","independent_heartbeat_v1"]}
 {"type":"snapshot","token":"...","session_id":"0123456789abcdef0123456789abcdef","revision":1,"game_available":true,"options":[{"id":"N1","kind":"toggle_with_input_adjustment","labels":{"zh_cn":"游戏速度","zh_tw":"遊戲速度","en":"Game Speed"},"tooltips":{},"group":{},"tooltip_style":"normal","active":false,"controllable":true,"value":"1.0","value_controllable":true,"value_type":"number","value_apply_mode":"stage_then_toggle","minimum":0.5,"maximum":10.0,"step":0.5}]}
 {"type":"command_accepted","token":"...","session_id":"0123456789abcdef0123456789abcdef","request_id":"42","status":"queued"}
 {"type":"command_accepted","token":"...","session_id":"0123456789abcdef0123456789abcdef","request_id":"43","status":"staged","operation":"value","value":"1.5","invoked":false}

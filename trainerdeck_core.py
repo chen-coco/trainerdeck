@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-PLUGIN_VERSION = "0.7.1"
+PLUGIN_VERSION = "0.7.2"
 SCHEMA_VERSION = 3
 SETTINGS_FILENAME = "settings.json"
 BINDINGS_FILENAME = "bindings.json"

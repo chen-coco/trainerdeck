@@ -59,7 +59,7 @@ Do not use the automatically generated GitHub “Source code” archives as plug
 
 ## Basic Usage
 
-Version 0.7.1 fixes the location controls in The Blood of Dawnwalker. Save and teleport controls display dropdowns; editable dropdowns offer “New location…” for entering a name. Added or removed locations synchronize from the original trainer, and “Teleport to Waypoint” displays only an Apply button. Quit and restart the game and trainer after upgrading to load the new Bridge.
+Version 0.7.2 fixes direct input for editable dropdowns. Save Location and Teleport in The Blood of Dawnwalker show both a dropdown and an input field, so you can type a value or name directly or select an existing value. The input stays visible while typing, after selection, and after applying a value. Teleport to Waypoint still displays only an Apply button. Quit and restart the game and trainer after upgrading to load the new Bridge.
 
 1. Start the target game, then open `…` → Decky → TrainerDeck.
 2. Confirm the detected game name and select “Search.” You can also enter part of a Chinese title or an English game name manually.
@@ -130,7 +130,7 @@ pnpm run package
 release/TrainerDeck-<version>.zip
 ```
 
-The current version produces `release/TrainerDeck-0.7.1.zip`.
+The current version produces `release/TrainerDeck-0.7.2.zip`.
 
 `TrainerDeckBridgeLauncher.exe` embeds both CLR2 and CLR4 Bridge payloads. At
 runtime it selects the payload whose metadata generation exactly matches the
