@@ -61,6 +61,7 @@ class Plugin:
         self.core_start_error = ""
         self.runtime_started = False
         self.runtime_start_error = ""
+        self._installation_operation_lock = asyncio.Lock()
 
     def _ensure_core(self) -> TrainerDeckCore:
         if self.core is not None:
@@ -123,7 +124,8 @@ class Plugin:
                 core.list_bindings().items() if core is not None else []
             ):
                 try:
-                    runtime.prepare_bridge(app_id, installation)
+                    async with self._installation_operation_lock:
+                        runtime.prepare_bridge(app_id, installation)
                 except Exception as error:
                     runtime.record_prepare_failure(
                         app_id,
@@ -161,7 +163,7 @@ class Plugin:
                 pass
         return {
             "ok": self.core is not None,
-            "version": "0.7.2",
+            "version": "0.8.1",
             "python_version": sys.version.split()[0],
             "core_ready": self.core is not None,
             "core_error": self.core_start_error,
@@ -198,6 +200,31 @@ class Plugin:
         core = self._ensure_core()
         return await asyncio.to_thread(core.list_installed)
 
+    async def delete_installation(self, installation_id: str, folder: str):
+        core = self._ensure_core()
+
+        def remove():
+            return core.delete_installation(installation_id, folder)
+
+        async with self._installation_operation_lock:
+            if self.runtime is not None:
+                return await asyncio.to_thread(
+                    self.runtime.delete_unused_installation, folder, remove,
+                )
+            return await asyncio.to_thread(remove)
+
+    async def get_option_favorites(self, app_id: int, trainer_sha256: str):
+        return await asyncio.to_thread(
+            self._ensure_core().get_option_favorites, app_id, trainer_sha256,
+        )
+
+    async def set_option_favorite(
+        self, app_id: int, trainer_sha256: str, option_id: str, favorite: bool,
+    ):
+        return await asyncio.to_thread(
+            self._ensure_core().set_option_favorite, app_id, trainer_sha256, option_id, favorite,
+        )
+
     async def get_binding(self, app_id: int):
         return self._ensure_core().get_binding(app_id)
 
@@ -215,6 +242,7 @@ class Plugin:
         target_type: str = "",
         shortcut_exe: str = "",
         launch_options_field: str = "",
+        installation_folder: str = "",
     ):
         return self._ensure_core().bind_trainer(
             app_id,
@@ -226,6 +254,7 @@ class Plugin:
             target_type,
             shortcut_exe,
             launch_options_field,
+            installation_folder,
         )
 
     async def unbind_trainer(
@@ -241,18 +270,24 @@ class Plugin:
             await self.runtime.revoke_app(app_id)
         return removed
 
-    async def prepare_trainer_bridge(self, app_id: int, installation_id: str):
-        core = self._ensure_core()
-        runtime = self._require_runtime()
-        installation = core.get_installation(installation_id)
-        prepared = await asyncio.to_thread(
-            runtime.prepare_bridge,
-            app_id,
-            installation,
-        )
-        await runtime.invalidate_app(app_id)
-        await runtime.emit_snapshot(app_id)
-        return prepared
+    async def prepare_trainer_bridge(
+        self, app_id: int, installation_id: str, installation_folder: str = "",
+    ):
+        async with self._installation_operation_lock:
+            core = self._ensure_core()
+            runtime = self._require_runtime()
+            installation = (
+                core.get_installation(installation_id, installation_folder)
+                if installation_folder else core.get_installation(installation_id)
+            )
+            prepared = await asyncio.to_thread(
+                runtime.prepare_bridge,
+                app_id,
+                installation,
+            )
+            await runtime.invalidate_app(app_id)
+            await runtime.emit_snapshot(app_id)
+            return prepared
 
     async def get_trainer_runtime(self, app_id: int):
         return self._require_runtime().get_snapshot(app_id)

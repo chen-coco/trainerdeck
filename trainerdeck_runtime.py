@@ -607,6 +607,29 @@ class TrainerRuntimeManager:
         self._bump_revision(numeric_app_id)
         return copy.deepcopy(prepared)
 
+    def delete_unused_installation(self, folder: str, delete: Callable[[], bool]) -> bool:
+        """Serialize deletion with preparation; preparation alone is not use."""
+        with self._prepare_lock:
+            key = self._installation_key(Path(folder))
+            owner = self._installation_owners.get(key)
+            session = self._sessions.get(owner) if owner is not None else None
+            if session is not None and session.get("connected"):
+                raise TrainerRuntimeError(
+                    "这个修改器仍在运行，请退出游戏和修改器后再清理"
+                )
+            # The core validates bindings and checks OS processes as part of the
+            # same deletion transaction. A revoked bridge can still be running,
+            # so a missing connection alone must never authorize deletion.
+            removed = delete()
+            if removed and owner is not None:
+                self._tokens.pop(owner, None)
+                self._prepared.pop(owner, None)
+                self._owned_installations.pop(owner, None)
+                self._installation_owners.pop(key, None)
+                self._sessions.pop(owner, None)
+                self._bump_revision(owner)
+            return removed
+
     @staticmethod
     def _installation_key(folder: Path) -> str:
         physical_folder = os.path.normcase(

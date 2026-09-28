@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { withTimeout } from "./async";
 import { getSettings, saveSettings } from "./backend";
 import { t } from "./i18n";
+import { LIBRARY_ROUTE } from "./library";
 import { RECOVERY_ROUTE } from "./recovery";
 import type { TrainerDeckSettings } from "./types";
 
@@ -182,6 +183,17 @@ export function TrainerDeckSettingsPage() {
     }
   }, []);
 
+  const openLibraryPage = useCallback(() => {
+    try {
+      Navigation.Navigate(LIBRARY_ROUTE);
+    } catch (error) {
+      toaster.toast({
+        title: t("打开修改器库失败", "Could not open trainer library"),
+        body: errorText(error),
+      });
+    }
+  }, []);
+
   return (
     <div
       style={{
@@ -268,6 +280,18 @@ export function TrainerDeckSettingsPage() {
               )
             }
           />
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title={t("修改器管理", "Trainer Management")}>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            description={t("查看已下载修改器、复用绑定和删除本地文件", "View downloads, reuse bindings, and delete local files")}
+            onClick={openLibraryPage}
+          >
+            {t("我的修改器库", "My Trainer Library")}
+          </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 

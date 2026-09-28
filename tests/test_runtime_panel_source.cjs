@@ -115,7 +115,7 @@ assert.doesNotMatch(
 );
 assert.match(
   source,
-  /runtime &&\s*runtime\.options\.map/,
+  /runtime &&\s*\(\s*<RuntimeOptionsPanel/,
   "the last known trainer menu must remain rendered while reconnecting",
 );
 assert.match(

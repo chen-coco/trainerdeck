@@ -14,22 +14,31 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import tempfile
+import threading
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-PLUGIN_VERSION = "0.7.2"
+PLUGIN_VERSION = "0.8.1"
 SCHEMA_VERSION = 3
 SETTINGS_FILENAME = "settings.json"
 BINDINGS_FILENAME = "bindings.json"
+FAVORITES_FILENAME = "option-favorites.json"
 METADATA_FILENAME = "trainerdeck.json"
+MAX_FAVORITE_SCOPES = 4096
+MAX_FAVORITES_PER_SCOPE = 512
+MAX_FAVORITES_BYTES = 4 * 1024 * 1024
+_CORE_STATE_LOCK = threading.RLock()
+_FAVORITES_LOCK = threading.RLock()
 OFFICIAL_HOSTS = {"flingtrainer.com", "www.flingtrainer.com"}
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -54,12 +63,28 @@ class TrainerDeckError(RuntimeError):
 
 def _atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
     )
-    os.replace(temporary, path)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _serialized_state(method):
+    """Share one lock across core instances and worker threads in this backend."""
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        with _CORE_STATE_LOCK:
+            return method(*args, **kwargs)
+    return wrapped
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -478,6 +503,7 @@ class TrainerDeckCore:
         self.user_name = user_name
         self.settings_path = self.settings_dir / SETTINGS_FILENAME
         self.bindings_path = self.settings_dir / BINDINGS_FILENAME
+        self.favorites_path = self.settings_dir / FAVORITES_FILENAME
         self.settings_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
 
@@ -541,6 +567,7 @@ class TrainerDeckCore:
             raise TrainerDeckError(f"目录必须位于以下可写位置之一：{allowed}")
         return resolved
 
+    @_serialized_state
     def save_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(settings, dict):
             raise TrainerDeckError("设置格式无效")
@@ -567,6 +594,95 @@ class TrainerDeckCore:
         Path(current["trainer_root"]).mkdir(parents=True, exist_ok=True)
         _atomic_write_json(self.settings_path, current)
         return current
+
+    @staticmethod
+    def _favorite_scope(app_id: int, trainer_sha256: str) -> str:
+        if type(app_id) is not int or not 0 < app_id <= 0xFFFFFFFF:
+            raise TrainerDeckError("Steam AppID 无效")
+        if not isinstance(trainer_sha256, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{64}", trainer_sha256,
+        ):
+            raise TrainerDeckError("修改器指纹无效，请等待面板连接后再收藏")
+        return f"{app_id}:{trainer_sha256.lower()}"
+
+    @staticmethod
+    def _valid_option_id(option_id: Any) -> bool:
+        return (
+            isinstance(option_id, str)
+            and 0 < len(option_id) <= 128
+            and bool(option_id.strip())
+            and not any(
+                ord(character) < 32 or ord(character) == 127
+                for character in option_id
+            )
+        )
+
+    def _favorite_records(self) -> dict[str, list[str]]:
+        try:
+            if self.favorites_path.stat().st_size > MAX_FAVORITES_BYTES:
+                raise TrainerDeckError("收藏文件过大，请检查收藏数据")
+            stored = json.loads(self.favorites_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as error:
+            raise TrainerDeckError("无法读取收藏数据，请检查收藏文件") from error
+        if (
+            not isinstance(stored, dict)
+            or type(stored.get("schema_version")) is not int
+            or stored.get("schema_version") != 1
+            or not isinstance(stored.get("favorites"), dict)
+        ):
+            raise TrainerDeckError("收藏数据格式无效")
+        records = stored["favorites"]
+        if len(records) > MAX_FAVORITE_SCOPES:
+            raise TrainerDeckError("收藏分组数量超出限制")
+        for scope, options in records.items():
+            if not isinstance(scope, str) or not re.fullmatch(
+                r"[1-9][0-9]{0,9}:[0-9a-f]{64}", scope,
+            ):
+                raise TrainerDeckError("收藏数据格式无效")
+            if (
+                int(scope.split(":", 1)[0]) > 0xFFFFFFFF
+                or not isinstance(options, list)
+                or len(options) > MAX_FAVORITES_PER_SCOPE
+            ):
+                raise TrainerDeckError("收藏数据格式无效")
+            if not all(self._valid_option_id(option) for option in options):
+                raise TrainerDeckError("收藏数据格式无效")
+        return records
+
+    def get_option_favorites(self, app_id: int, trainer_sha256: str) -> list[str]:
+        scope = self._favorite_scope(app_id, trainer_sha256)
+        with _FAVORITES_LOCK:
+            return sorted(set(self._favorite_records().get(scope, [])))
+
+    def set_option_favorite(
+        self, app_id: int, trainer_sha256: str, option_id: str, favorite: bool,
+    ) -> list[str]:
+        scope = self._favorite_scope(app_id, trainer_sha256)
+        if not self._valid_option_id(option_id) or type(favorite) is not bool:
+            raise TrainerDeckError("收藏选项格式无效")
+        with _FAVORITES_LOCK:
+            records = self._favorite_records()
+            options = set(records.get(scope, []))
+            if favorite:
+                options.add(option_id)
+            else:
+                options.discard(option_id)
+            if len(options) > MAX_FAVORITES_PER_SCOPE:
+                raise TrainerDeckError("单个修改器最多收藏 512 项")
+            if options:
+                records[scope] = sorted(options)
+            else:
+                records.pop(scope, None)
+            value = {"schema_version": 1, "favorites": records}
+            byte_count = len(
+                json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+            ) + 1
+            if len(records) > MAX_FAVORITE_SCOPES or byte_count > MAX_FAVORITES_BYTES:
+                raise TrainerDeckError("收藏数量超出存储限制，请先取消部分收藏")
+            _atomic_write_json(self.favorites_path, value)
+            return sorted(options)
 
     @staticmethod
     def _request(url: str, timeout: int = 20) -> urllib.response.addinfourl:
@@ -1092,13 +1208,20 @@ class TrainerDeckCore:
         )
         return records
 
-    def get_installation(self, installation_id: str) -> dict[str, Any]:
+    @_serialized_state
+    def get_installation(
+        self, installation_id: str, installation_folder: str = "",
+    ) -> dict[str, Any]:
         wanted = str(installation_id)
+        if not isinstance(installation_folder, str):
+            raise TrainerDeckError("修改器安装目录无效")
+        folder = str(Path(installation_folder).resolve()) if installation_folder else ""
         installation = next(
             (
                 item
                 for item in self.list_installed()
                 if item["id"] == wanted
+                and (not folder or str(Path(item["folder"]).resolve()) == folder)
             ),
             None,
         )
@@ -1106,10 +1229,300 @@ class TrainerDeckCore:
             raise TrainerDeckError("找不到已安装修改器")
         return installation
 
+    @staticmethod
+    def _reject_link(path: Path) -> os.stat_result:
+        information = path.lstat()
+        if stat.S_ISLNK(information.st_mode) or getattr(
+            information, "st_file_attributes", 0,
+        ) & 0x400:
+            raise TrainerDeckError("安装目录包含符号链接或目录联接，无法安全清理")
+        return information
+
+    @staticmethod
+    def _assert_installation_not_running(
+        folder: Path, executable: Path, process_root: Path = Path("/proc"),
+        process_user_id: int | None = None,
+    ) -> None:
+        """Check live Linux processes, including Wine's external cached EXE.
+
+        The launcher gives cached trainers their original working directory and
+        TRAINERDECK_BRIDGE_MANIFEST. Both are necessary: cached argv can point
+        outside the installation, while fail-open launches have no manifest env.
+        """
+        if os.name == "nt" and process_root == Path("/proc"):
+            return  # Production Decky uses Linux; Windows has no /proc surface.
+        normalized = str(folder.resolve()).replace("\\", "/").rstrip("/").casefold()
+        # A version name must not match a sibling such as v1-2. Allow quoted
+        # shell arguments and Wine's Z: prefix without accepting path substrings.
+        reference = re.compile(
+            r"(?:^|[\s\x00\"'=:(])" + re.escape(normalized)
+            + r"(?=$|[/\x00\"'])"
+        )
+        # Wine may keep Windows cwd/environment outside Linux /proc. Its cached
+        # argv still contains this generation directory, derived from the EXE
+        # hash (the installation metadata hash instead describes the archive).
+        digest = hashlib.sha256()
+        try:
+            with executable.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as error:
+            raise TrainerDeckError("无法检查修改器进程，请稍后重试") from error
+        cached_executable = re.compile(
+            r"/" + digest.hexdigest()[:16] + r"-a[0-9]+-s[0-9a-f]{16}/"
+            + re.escape(executable.name.casefold()) + r"(?=$|[\s\x00\"'])"
+        )
+
+        def matches(value: str) -> bool:
+            normalized_value = value.replace("\\", "/").casefold()
+            return bool(
+                reference.search(normalized_value)
+                or cached_executable.search(normalized_value)
+            )
+
+        def read_process_file(path: Path) -> str:
+            with path.open("rb") as stream:
+                data = stream.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024:
+                raise OSError("process metadata exceeds the inspection limit")
+            return os.fsdecode(data)
+
+        try:
+            processes = list(process_root.iterdir())
+        except OSError as error:
+            raise TrainerDeckError(
+                "无法检查运行中的修改器，请确认游戏和修改器已退出后重试"
+            ) from error
+        names = {executable.name.casefold(), "trainerdeckbridgelauncher.exe"}
+        short_names = {os.fsdecode(name.encode("utf-8")[:15]) for name in names}
+        for process in processes:
+            if not process.name.isdigit():
+                continue
+            command = ""
+            command_unreadable = False
+            try:
+                command = read_process_file(process / "cmdline")
+            except FileNotFoundError:
+                continue  # Processes may exit between enumeration and inspection.
+            except OSError:
+                command_unreadable = True
+            if matches(command):
+                raise TrainerDeckError("这个修改器仍在运行，请退出游戏和修改器后再清理")
+
+            paths: list[str] = []
+            inaccessible = False
+            cwd_unreadable = False
+            for field in ("exe", "cwd"):
+                try:
+                    value = os.readlink(process / field)
+                    paths.append(value)
+                    if matches(value):
+                        raise TrainerDeckError("这个修改器仍在运行，请退出游戏和修改器后再清理")
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    inaccessible = True
+                    if field == "cwd":
+                        cwd_unreadable = True
+            try:
+                comm = read_process_file(process / "comm").strip().casefold()
+            except OSError:
+                comm = ""
+            arguments = [
+                part.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+                for part in command.split("\0") if part
+            ]
+            plausible_trainer = comm in short_names or any(
+                argument in names for argument in arguments
+            )
+            other_executable = not plausible_trainer and any(
+                argument.endswith(".exe") and argument not in names
+                for argument in arguments
+            )
+            # Ignore inaccessible unrelated Steam/kernel/other-user processes.
+            # Read environments only for Wine/EXE candidates, never treat an
+            # unrelated process's permission error as proof this trainer is busy.
+            wine_process = plausible_trainer or comm.startswith("wine") or any(
+                "wine" in Path(path).name.casefold() for path in paths
+            ) or any(
+                argument.endswith(".exe") or argument.startswith("wine")
+                for argument in arguments
+            )
+            if not wine_process:
+                continue
+            environment_unreadable = False
+            try:
+                environment = read_process_file(process / "environ")
+                for value in environment.split("\0"):
+                    if value.startswith((
+                        "TRAINERDECK_BRIDGE_MANIFEST=", "PROTON_REMOTE_DEBUG_CMD=",
+                    )) and matches(value.split("=", 1)[1]):
+                        raise TrainerDeckError("这个修改器仍在运行，请退出游戏和修改器后再清理")
+            except FileNotFoundError:
+                continue
+            except OSError:
+                environment_unreadable = True
+            if other_executable:
+                continue  # Known different EXE; unreadable env is not our usage.
+            if process_user_id is not None:
+                try:
+                    if process.stat().st_uid != process_user_id:
+                        continue  # Inaccessible metadata from another user's Wine.
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    pass
+            if (
+                plausible_trainer and (
+                    environment_unreadable or (command_unreadable and inaccessible)
+                )
+            ) or (
+                wine_process and (
+                    command_unreadable or (cwd_unreadable and environment_unreadable)
+                )
+            ):
+                # Retry can succeed as soon as this possibly matching process
+                # exits; no permanent in-memory 'was prepared' lock is retained.
+                if process.exists():
+                    raise TrainerDeckError(
+                        "无法确认修改器或 Wine 进程是否已退出，请关闭游戏和修改器后重试"
+                    )
+
+    @_serialized_state
+    def delete_installation(self, installation_id: str, folder: str) -> bool:
+        """Delete the exact managed installation, never a parent or a matching ID elsewhere."""
+        if not isinstance(installation_id, str) or not re.fullmatch(
+            r"[0-9a-f]{24}", installation_id,
+        ):
+            raise TrainerDeckError("修改器安装标识无效")
+        if not isinstance(folder, str) or not folder or "\0" in folder:
+            raise TrainerDeckError("修改器安装目录无效")
+        requested = Path(folder)
+        if not requested.is_absolute() or ".." in requested.parts:
+            raise TrainerDeckError("修改器安装目录必须是受管目录的完整路径")
+        settings = self.get_settings()
+        configured_root = Path(settings["trainer_root"]).expanduser()
+        root = self._validated_trainer_root(str(configured_root))
+        target = requested.resolve()
+        # Downloads always have exactly the game/version layout. In particular,
+        # a copied metadata file at the root or game level cannot grant deletion.
+        if (
+            target == root or not _is_within(target, root)
+            or len(target.relative_to(root).parts) != 2
+        ):
+            raise TrainerDeckError("只能清理当前下载目录中的具体修改器版本")
+        try:
+            self._reject_link(configured_root)
+            for candidate in (requested, *requested.parents):
+                self._reject_link(candidate)
+                if candidate == root:
+                    break
+            if not target.is_dir() or requested != target:
+                raise TrainerDeckError("安装目录不是有效的受管目录")
+            metadata_path = target / METADATA_FILENAME
+            metadata_stat = self._reject_link(metadata_path)
+            if (
+                not stat.S_ISREG(metadata_stat.st_mode)
+                or metadata_stat.st_size > 1024 * 1024
+            ):
+                raise TrainerDeckError("安装元数据无效，无法安全清理")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict) or metadata.get("id") != installation_id:
+                raise TrainerDeckError("安装标识与选中的目录不一致")
+            if (
+                type(metadata.get("schema_version")) is not int
+                or not 1 <= metadata["schema_version"] <= SCHEMA_VERSION
+            ):
+                raise TrainerDeckError("安装元数据版本无效")
+            if not isinstance(metadata.get("sha256"), str) or not re.fullmatch(
+                r"[0-9a-fA-F]{64}", metadata["sha256"],
+            ):
+                raise TrainerDeckError("安装元数据指纹无效")
+            relative = metadata.get("executable_relative")
+            if (
+                not isinstance(relative, str) or not relative
+                or "\\" in relative or ":" in relative
+            ):
+                raise TrainerDeckError("安装元数据中的修改器路径无效")
+            executable_relative = PurePosixPath(relative)
+            executable = target / relative
+            if (
+                executable_relative.is_absolute()
+                or ".." in executable_relative.parts
+                or not _is_within(executable.resolve(), target)
+                or not executable.is_file()
+            ):
+                raise TrainerDeckError("修改器 EXE 必须位于选中的安装目录内")
+            # Fail closed when recovery metadata cannot be read: its absence is
+            # different from a malformed file that may hide an active binding.
+            if self.bindings_path.exists():
+                bindings = json.loads(self.bindings_path.read_text(encoding="utf-8"))
+                if not isinstance(bindings, dict):
+                    raise TrainerDeckError("无法确认绑定状态，暂不能清理")
+            else:
+                bindings = {}
+            for binding in bindings.values():
+                if not isinstance(binding, dict):
+                    raise TrainerDeckError("无法确认绑定状态，暂不能清理")
+                if (
+                    binding.get("active", True) is False
+                    and binding.get("launch_options_restored") is True
+                ):
+                    continue
+                bound_id = binding.get("installation_id") or binding.get("id")
+                if not isinstance(bound_id, str) or not bound_id:
+                    raise TrainerDeckError("无法确认绑定状态，暂不能清理")
+                paths = [
+                    binding.get("installation_folder"),
+                    binding.get("managed_launch_executable"),
+                ]
+                candidates = binding.get("candidate_launch_executables", [])
+                if isinstance(candidates, list):
+                    paths.extend(candidates)
+                # IDs can refer to repeated downloads. Conservatively protect
+                # every copy until its active binding is removed.
+                if bound_id == installation_id or any(
+                    isinstance(value, str) and value
+                    and _is_within(Path(value).resolve(), target)
+                    for value in paths
+                ):
+                    raise TrainerDeckError(
+                        "这个修改器仍有游戏绑定或待恢复启动项，"
+                        "请先解除绑定并恢复启动项再清理"
+                    )
+            target_device = target.stat().st_dev
+
+            # Decky runs on Linux. Keep this independent of bridge startup so
+            # an unavailable/restarted runtime cannot bypass live-process checks.
+            self._assert_installation_not_running(
+                target, executable, process_user_id=self.user_home.stat().st_uid,
+            )
+
+            def scan_error(error: OSError) -> None:
+                raise error
+
+            for directory, directories, files in os.walk(
+                target, followlinks=False, onerror=scan_error,
+            ):
+                for name in [*directories, *files]:
+                    path = Path(directory) / name
+                    information = self._reject_link(path)
+                    if information.st_dev != target_device or not (
+                        stat.S_ISDIR(information.st_mode) or stat.S_ISREG(information.st_mode)
+                    ) or (stat.S_ISREG(information.st_mode) and information.st_nlink > 1):
+                        raise TrainerDeckError("安装目录包含外部关联文件，无法安全清理")
+                    if path != metadata_path and path.name == METADATA_FILENAME:
+                        raise TrainerDeckError("安装目录包含其他安装记录，无法安全清理")
+            shutil.rmtree(target)
+        except (OSError, ValueError) as error:
+            raise TrainerDeckError(f"无法安全清理这个修改器：{error}") from error
+        return True
+
     def _bindings(self) -> dict[str, Any]:
         value = _read_json(self.bindings_path, {})
         return value if isinstance(value, dict) else {}
 
+    @_serialized_state
     def bind_trainer(
         self,
         app_id: int,
@@ -1121,6 +1534,7 @@ class TrainerDeckCore:
         target_type: str = "",
         shortcut_exe: str = "",
         launch_options_field: str = "",
+        installation_folder: str = "",
     ) -> dict[str, Any]:
         try:
             numeric_app_id = int(app_id)
@@ -1150,7 +1564,10 @@ class TrainerDeckCore:
         normalized_shortcut_exe = str(shortcut_exe or "").strip()
         if len(normalized_shortcut_exe) > 4096 or "\0" in normalized_shortcut_exe:
             raise TrainerDeckError("非 Steam 快捷方式路径无效")
-        installation = self.get_installation(installation_id)
+        installation = (
+            self.get_installation(installation_id, installation_folder)
+            if installation_folder else self.get_installation(installation_id)
+        )
         managed_path = Path(
             managed_launch_executable or installation["executable"]
         ).resolve()
@@ -1300,7 +1717,11 @@ class TrainerDeckCore:
         if not installation_id:
             return None
         try:
-            installation = self.get_installation(str(installation_id))
+            installation_folder = str(value.get("installation_folder") or "")
+            installation = (
+                self.get_installation(str(installation_id), installation_folder)
+                if installation_folder else self.get_installation(str(installation_id))
+            )
         except TrainerDeckError:
             return None
         managed_value = str(value.get("managed_launch_executable") or "")
@@ -1384,7 +1805,11 @@ class TrainerDeckCore:
             installation: dict[str, Any] | None = None
             if installation_id:
                 try:
-                    installation = self.get_installation(installation_id)
+                    installation_folder = str(raw_value.get("installation_folder") or "")
+                    installation = (
+                        self.get_installation(installation_id, installation_folder)
+                        if installation_folder else self.get_installation(installation_id)
+                    )
                 except TrainerDeckError:
                     installation = None
 
@@ -1429,6 +1854,10 @@ class TrainerDeckCore:
                 {
                     "app_id": app_id,
                     "installation_id": installation_id,
+                    "installation_folder": str(
+                        raw_value.get("installation_folder")
+                        or (installation or {}).get("folder") or ""
+                    ),
                     "title": str(
                         (installation or {}).get("title")
                         or raw_value.get("display_name")
@@ -1484,6 +1913,7 @@ class TrainerDeckCore:
                 resolved[app_id] = installation
         return resolved
 
+    @_serialized_state
     def unbind_trainer(
         self,
         app_id: int,

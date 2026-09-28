@@ -19,6 +19,7 @@ out/
 release/
 
 # Local diagnostics and reverse-engineering samples
+diagnostics/
 .research/
 samples/
 scripts/inspect-cef.mjs

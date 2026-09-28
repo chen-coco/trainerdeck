@@ -82,6 +82,7 @@ export interface InstalledTrainer extends TrainerEntry {
 export interface TrainerBindingRecord {
   app_id: number;
   installation_id: string;
+  installation_folder?: string;
   title: string;
   display_name: string;
   target_type?: "steam" | "shortcut" | null;

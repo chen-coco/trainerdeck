@@ -59,7 +59,13 @@ Do not use the automatically generated GitHub “Source code” archives as plug
 
 ## Basic Usage
 
-Version 0.7.2 fixes direct input for editable dropdowns. Save Location and Teleport in The Blood of Dawnwalker show both a dropdown and an input field, so you can type a value or name directly or select an existing value. The input stays visible while typing, after selection, and after applying a value. Teleport to Waypoint still displays only an Apply button. Quit and restart the game and trainer after upgrading to load the new Bridge.
+Version 0.8.1 moves My Trainer Library to Open Settings → My Trainer Library. Opening it immediately shows downloaded versions and game bindings without starting an automatic search or download. Start the target game, then bind an existing download without downloading again.
+
+Version 0.8.1 shows the folder and Delete Permanently / Cancel controls directly in the selected library entry, without depending on a Steam modal. If game launch options still refer to the trainer, including recovery paths retained after a version change, selecting Delete Files explains how to exit the game and unbind it using Manage and Restore Launch Options below the library. After exiting the game and trainer and restoring launch options, return to delete the files; reloading the plugin is no longer required. A running trainer still blocks deletion with an explanation. Leaving the page does not silently cancel a confirmed deletion. Success and failure both produce a notification.
+
+Favorite options appear first. Filter by Chinese or English names and groups, show only favorites or enabled options, and collapse groups. Favorites are stored separately for each game and trainer file version; select them again after changing versions. Filtering and collapsing never change trainer option state or execute actions.
+
+Editable dropdowns retain direct value/name input. This release reuses Bridge 0.7.2 without protocol changes.
 
 1. Start the target game, then open `…` → Decky → TrainerDeck.
 2. Confirm the detected game name and select “Search.” You can also enter part of a Chinese title or an English game name manually.
@@ -130,7 +136,7 @@ pnpm run package
 release/TrainerDeck-<version>.zip
 ```
 
-The current version produces `release/TrainerDeck-0.7.2.zip`.
+The current version produces `release/TrainerDeck-0.8.1.zip`.
 
 `TrainerDeckBridgeLauncher.exe` embeds both CLR2 and CLR4 Bridge payloads. At
 runtime it selects the payload whose metadata generation exactly matches the

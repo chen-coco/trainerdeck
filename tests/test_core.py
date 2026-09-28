@@ -537,7 +537,7 @@ class ArchiveTests(CoreTestCase):
             for installation_id in ("logical-a", "logical-b")
         }
 
-        def get_installation(installation_id):
+        def get_installation(installation_id, installation_folder=""):
             try:
                 return installations[str(installation_id)]
             except KeyError as error:
