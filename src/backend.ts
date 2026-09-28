@@ -26,6 +26,21 @@ export const downloadTrainer = callable<
 
 export const listInstalled = callable<[], InstalledTrainer[]>("list_installed");
 
+export const deleteInstallation = callable<
+  [installationId: string, folder: string],
+  boolean
+>("delete_installation");
+
+export const getOptionFavorites = callable<
+  [appId: number, trainerSha256: string],
+  string[]
+>("get_option_favorites");
+
+export const setOptionFavorite = callable<
+  [appId: number, trainerSha256: string, optionId: string, favorite: boolean],
+  string[]
+>("set_option_favorite");
+
 export const getBinding = callable<
   [appId: number],
   InstalledTrainer | null
@@ -44,6 +59,7 @@ export const bindTrainer = callable<
     targetType: "steam" | "shortcut",
     shortcutExe: string,
     launchOptionsField?: "app" | "shortcut",
+    installationFolder?: string,
   ],
   InstalledTrainer
 >("bind_trainer");
@@ -56,7 +72,7 @@ export const unbindTrainer = callable<
 );
 
 export const prepareTrainerBridge = callable<
-  [appId: number, installationId: string],
+  [appId: number, installationId: string, installationFolder?: string],
   TrainerBridgePreparation
 >("prepare_trainer_bridge");
 

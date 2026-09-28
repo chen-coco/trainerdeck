@@ -18,7 +18,6 @@ import {
   ToggleField,
 } from "@decky/ui";
 import {
-  Fragment,
   useCallback,
   useEffect,
   useRef,
@@ -42,6 +41,8 @@ import {
 } from "./backend";
 import { searchFlingTrainersMany } from "./fling";
 import { localizedTrainerText, t } from "./i18n";
+import { LIBRARY_ROUTE, TrainerLibrary } from "./library";
+import { RuntimeOptionsPanel } from "./runtime-options";
 import { qamInputRecoveryController } from "./input-recovery";
 import {
   cancelInputRecoverySession,
@@ -597,6 +598,7 @@ function RuntimeOptionRow({
 }
 
 interface InstallAndBindOptions {
+  installation?: InstalledTrainer;
   allowExplicitTargetSelection?: boolean;
   automatic?: boolean;
   automaticOperationKey?: string;
@@ -654,7 +656,7 @@ function markAutomaticDownloadHandled(key: string): void {
   shared.__trainerDeckAutomaticDownloadHandledV1 = handled;
 }
 
-function Content() {
+function Content({ libraryPage = false }: { libraryPage?: boolean }) {
   const initialRunningAppId = useRef(currentRunningAppId()).current;
   const [settings, setSettings] =
     useState<TrainerDeckSettings>(DEFAULT_SETTINGS);
@@ -677,6 +679,8 @@ function Content() {
   const [results, setResults] = useState<TrainerEntry[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
   const [searchStage, setSearchStage] = useState("");
   const [needsRestart, setNeedsRestart] = useState(false);
   const [runtime, setRuntime] = useState<TrainerRuntimeSnapshot | null>(null);
@@ -1245,7 +1249,7 @@ function Content() {
     let alive = true;
     let pollTimer: number | undefined;
     const appId = selectedAppId;
-    if (appId <= 0 || !binding) {
+    if (libraryPage || appId <= 0 || !binding) {
       setRuntime(null);
       return () => {
         alive = false;
@@ -1284,7 +1288,7 @@ function Content() {
         registeredListener,
       );
     };
-  }, [acceptRuntimeSnapshot, binding, selectedAppId]);
+  }, [acceptRuntimeSnapshot, binding, libraryPage, selectedAppId]);
 
   const appendWarning = useCallback((message: string) => {
     setWarnings((current) =>
@@ -1297,6 +1301,7 @@ function Content() {
     options: InstallAndBindOptions = {},
   ): Promise<boolean> => {
     const {
+      installation,
       allowExplicitTargetSelection = false,
       automatic = false,
       automaticOperationKey = "",
@@ -1350,7 +1355,6 @@ function Content() {
     const operationTargetType = operationTarget.targetType;
     const operationShortcutExe = operationTarget.shortcutExe?.trim() ?? "";
     const operationRunning = operationTarget.running;
-    const operationBinding = bindingRef.current;
     const operationToken = `${operationAppId}:${entry.id}:${Date.now()}`;
     if (!acquireSharedInstallLock(operationToken)) {
       if (!automatic) {
@@ -1454,7 +1458,8 @@ function Content() {
         automaticDownloadHandled.current = automaticOperationKey;
         markAutomaticDownloadHandled(automaticOperationKey);
       }
-      const installed = await downloadTrainer(entry);
+      const installed = installation ?? await downloadTrainer(entry);
+      setLibraryRefreshKey((value) => value + 1);
       if (automatic && !await automaticStillEnabled()) {
         return automaticStopped(
           t(
@@ -1463,7 +1468,7 @@ function Content() {
           ),
         );
       }
-      const bridge = await prepareTrainerBridge(operationAppId, installed.id);
+      const bridge = await prepareTrainerBridge(operationAppId, installed.id, installed.folder);
       if (automatic && !shouldContinue()) {
         return automaticStopped(
           t(
@@ -1544,6 +1549,13 @@ function Content() {
       const managedLaunchExecutable = bridge.supported
         ? bridge.launch_executable
         : installed.executable;
+      // Re-read the recovery record when reusing a library item as well as
+      // downloading: a different panel may have updated it in the meantime.
+      const operationBinding = automatic ? null : await withTimeout(
+        getBinding(operationAppId),
+        3500,
+        t("复查修改器绑定超时", "Rechecking the trainer binding timed out"),
+      );
       const originalLaunchOptions = launchOptionsBeforeBinding(
         latestDetails,
         automatic ? null : operationBinding,
@@ -1565,6 +1577,7 @@ function Content() {
         latestDetails.targetType,
         latestShortcutExe || operationShortcutExe,
         latestDetails.launchOptionsField,
+        installed.folder,
       );
       await writeLaunchOptionsSafely(latestDetails, launchOptions);
       bindingRef.current = saved;
@@ -1577,7 +1590,9 @@ function Content() {
       notify(
         automatic
           ? t("已自动下载并添加", "Automatically downloaded and added")
-          : t("已下载并绑定", "Downloaded and bound"),
+          : installation
+            ? t("已绑定本地修改器", "Local trainer bound")
+            : t("已下载并绑定", "Downloaded and bound"),
         bridge.supported
           ? operationRunning
             ? t(
@@ -1598,7 +1613,9 @@ function Content() {
       notify(
         automatic
           ? t("自动添加失败", "Automatic setup failed")
-          : t("安装失败", "Installation failed"),
+          : installation
+            ? t("绑定失败", "Binding failed")
+            : t("安装失败", "Installation failed"),
         errorText(error),
       );
       return false;
@@ -1610,10 +1627,14 @@ function Content() {
         );
       }
       releaseSharedInstallLock(operationToken);
+      setLibraryRefreshKey((value) => value + 1);
     }
   }, [acceptRuntimeSnapshot, appendWarning]);
 
   useEffect(() => {
+    // The settings library is a manual management page. Opening it must not
+    // start a search, download, or automatic binding transaction.
+    if (libraryPage) return;
     const currentTarget = target;
     const decision = decideAutomaticAdd({
       appId: currentTarget?.appId ?? 0,
@@ -1660,7 +1681,7 @@ function Content() {
       automaticAddManuallySuppressed.current ||
       installInFlight.current !== null ||
       sharedInstallLock() !== null ||
-      busy !== null
+      busy !== null || libraryBusy
     ) {
       return;
     }
@@ -1812,6 +1833,8 @@ function Content() {
     bindingReady,
     busy,
     installAndBind,
+    libraryBusy,
+    libraryPage,
     runSearch,
     settings.auto_search_and_add,
     settingsStatus,
@@ -1844,6 +1867,7 @@ function Content() {
     setBusy(`download:${entry.id}`);
     try {
       const installed = await downloadTrainer(entry);
+      setLibraryRefreshKey((value) => value + 1);
       notify(
         t("修改器已下载", "Trainer downloaded"),
         installed.folder || installed.executable,
@@ -1868,7 +1892,7 @@ function Content() {
     const operationAppId = target.appId;
     setBusy("prepare-bridge");
     try {
-      const bridge = await prepareTrainerBridge(operationAppId, binding.id);
+      const bridge = await prepareTrainerBridge(operationAppId, binding.id, binding.folder);
       if (!bridge.supported) {
         notify(t("同步组件不可用", "Synchronization unavailable"), bridge.reason);
         acceptRuntimeSnapshot(await getTrainerRuntime(operationAppId));
@@ -1900,6 +1924,7 @@ function Content() {
         latestDetails.targetType,
         latestDetails.shortcutExe ?? "",
         latestDetails.launchOptionsField,
+        binding.folder,
       );
       await writeLaunchOptionsSafely(
         latestDetails,
@@ -2109,6 +2134,8 @@ function Content() {
         shortcut_exe: binding.shortcut_exe || "",
       });
       setBinding(null);
+      bindingRef.current = null;
+      setLibraryRefreshKey((value) => value + 1);
       notify(
         t("已解除绑定", "Trainer unbound"),
         t(
@@ -2146,7 +2173,24 @@ function Content() {
     }
   }, []);
 
-  const disabled = busy !== null;
+  const bindInstalledTrainer = useCallback((installation: InstalledTrainer) => {
+    automaticAddGeneration.current += 1;
+    automaticAddManuallySuppressed.current = true;
+    return installAndBind(installation, {
+      installation,
+      allowExplicitTargetSelection: true,
+    });
+  }, [installAndBind]);
+
+  const onLibraryOperationChange = useCallback((active: boolean) => {
+    if (active) {
+      automaticAddGeneration.current += 1;
+      automaticAddManuallySuppressed.current = true;
+    }
+    setLibraryBusy(active);
+  }, []);
+
+  const disabled = busy !== null || libraryBusy;
   const runtimeUpgradeRequired = Boolean(
     runtime?.connected &&
       !REQUIRED_RUNTIME_CAPABILITIES.every((capability) =>
@@ -2157,6 +2201,32 @@ function Content() {
     runtime?.connected &&
       (runtime.capabilities ?? []).includes("trainer_window_visible_v1"),
   );
+
+  if (libraryPage) {
+    return (
+      <Focusable style={{
+        boxSizing: "border-box", display: "flex", flexDirection: "column",
+        minHeight: "100%", overflowY: "auto", paddingTop: "48px", paddingBottom: "24px",
+      }}>
+        <TrainerLibrary
+          alwaysExpanded
+          target={target}
+          backendReady={backendStatus?.core_ready === true}
+          busy={busy !== null}
+          refreshKey={libraryRefreshKey}
+          onBind={bindInstalledTrainer}
+          onOperationChange={onLibraryOperationChange}
+        />
+        <PanelSection title={t("启动项管理", "Launch Options")}>
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={disabled} onClick={openRecoveryPage}>
+              {t("管理与恢复启动项", "Manage and Restore Launch Options")}
+            </ButtonItem>
+          </PanelSectionRow>
+        </PanelSection>
+      </Focusable>
+    );
+  }
 
   return (
     <Focusable style={{ display: "flex", flexDirection: "column" }}>
@@ -2243,7 +2313,7 @@ function Content() {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            disabled={busy !== null && busy !== "search"}
+            disabled={libraryBusy || (busy !== null && busy !== "search")}
             onClick={() =>
               busy === "search"
                 ? cancelSearch()
@@ -2434,54 +2504,26 @@ function Content() {
               </ButtonItem>
             </PanelSectionRow>
           )}
-          {runtime &&
-            runtime.options.map((option, index) => {
-              const group = localizedTrainerText(option.group);
-              const previousGroup =
-                index > 0
-                  ? localizedTrainerText(runtime.options[index - 1].group)
-                  : "";
-              return (
-                <Fragment key={option.id}>
-                  {group && group !== previousGroup && (
-                    <PanelSectionRow>
-                      <div
-                        style={{
-                          fontSize: "13px",
-                          fontWeight: 700,
-                          marginTop: "6px",
-                          opacity: 0.85,
-                        }}
-                      >
-                        {group}
-                      </div>
-                    </PanelSectionRow>
-                  )}
-                  <PanelSectionRow>
-                    <RuntimeOptionRow
-                      option={option}
-                      connected={runtime.connected === true}
-                      disabled={
-                        disabled ||
-                        needsRestart ||
-                        runtimeUpgradeRequired ||
-                        runtimeRequest !== null ||
-                        runtime.connected !== true ||
-                        runtime.game_available !== true
-                      }
-                      gameAvailable={runtime.game_available === true}
-                      onToggle={(desired) =>
-                        void changeRuntimeOption(option, desired)
-                      }
-                      onValue={(value) =>
-                        void changeRuntimeValue(option, value)
-                      }
-                      onAction={() => void invokeRuntimeAction(option)}
-                    />
-                  </PanelSectionRow>
-                </Fragment>
-              );
-            })}
+          {runtime && (
+            <RuntimeOptionsPanel
+              runtime={runtime}
+              renderOption={(option) => (
+                <RuntimeOptionRow
+                  option={option}
+                  connected={runtime.connected === true}
+                  disabled={
+                    disabled || needsRestart || runtimeUpgradeRequired ||
+                    runtimeRequest !== null || !runtime.connected ||
+                    runtime.game_available !== true
+                  }
+                  gameAvailable={runtime.game_available === true}
+                  onToggle={(desired) => void changeRuntimeOption(option, desired)}
+                  onValue={(value) => void changeRuntimeValue(option, value)}
+                  onAction={() => void invokeRuntimeAction(option)}
+                />
+              )}
+            />
+          )}
           <PanelSectionRow>
             <ButtonItem
               layout="below"
@@ -2531,10 +2573,15 @@ function Content() {
   );
 }
 
+function TrainerDeckLibraryPage() {
+  return <Content libraryPage />;
+}
+
 export default definePlugin(() => {
   registerInputRecoveryUi();
   routerHook.addRoute(SETTINGS_ROUTE, TrainerDeckSettingsPage, { exact: true });
   routerHook.addRoute(RECOVERY_ROUTE, TrainerDeckRecoveryPage, { exact: true });
+  routerHook.addRoute(LIBRARY_ROUTE, TrainerDeckLibraryPage, { exact: true });
   return {
     name: "TrainerDeck",
     titleView: <div className={staticClasses.Title}>TrainerDeck</div>,
@@ -2544,6 +2591,7 @@ export default definePlugin(() => {
       unregisterInputRecoveryUi();
       routerHook.removeRoute(SETTINGS_ROUTE);
       routerHook.removeRoute(RECOVERY_ROUTE);
+      routerHook.removeRoute(LIBRARY_ROUTE);
       console.log("TrainerDeck frontend unloaded");
     },
   };
