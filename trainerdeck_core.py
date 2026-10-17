@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-PLUGIN_VERSION = "0.8.1"
+PLUGIN_VERSION = "0.8.3"
 SCHEMA_VERSION = 3
 SETTINGS_FILENAME = "settings.json"
 BINDINGS_FILENAME = "bindings.json"
@@ -1388,8 +1388,96 @@ class TrainerDeckCore:
                         "无法确认修改器或 Wine 进程是否已退出，请关闭游戏和修改器后重试"
                     )
 
+    def _strict_bindings(self) -> dict[str, Any]:
+        """Never turn unreadable recovery data into an empty writable state."""
+        try:
+            if not self.bindings_path.exists():
+                return {}
+            bindings = json.loads(self.bindings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise TrainerDeckError("无法确认绑定状态，请修复绑定记录后重试") from error
+        if not isinstance(bindings, dict):
+            raise TrainerDeckError("无法确认绑定状态，请修复绑定记录后重试")
+        return bindings
+
+    @staticmethod
+    def _binding_snapshot(app_id: str, binding: dict[str, Any]) -> dict[str, Any]:
+        try:
+            numeric_app_id = int(app_id)
+        except (TypeError, ValueError) as error:
+            raise TrainerDeckError("绑定记录中的 Steam AppID 无效") from error
+        if not 0 < numeric_app_id < 2 ** 32 or str(numeric_app_id) != app_id:
+            raise TrainerDeckError("绑定记录中的 Steam AppID 无效")
+        return {
+            "app_id": numeric_app_id,
+            "installation_id": str(binding.get("installation_id") or binding.get("id") or ""),
+            "bound_at": str(binding.get("bound_at") or ""),
+        }
+
+    def _installation_binding_references(
+        self, installation_id: str, target: Path, bindings: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        references: dict[str, dict[str, Any]] = {}
+        for key, binding in bindings.items():
+            if not isinstance(binding, dict):
+                raise TrainerDeckError("无法确认绑定状态，暂不能清理")
+            if (
+                binding.get("active", True) is False
+                and binding.get("launch_options_restored") is True
+            ):
+                continue
+            bound_id = binding.get("installation_id") or binding.get("id")
+            if not isinstance(bound_id, str) or not bound_id:
+                raise TrainerDeckError("无法确认绑定状态，暂不能清理")
+            paths = [binding.get("installation_folder"), binding.get("managed_launch_executable")]
+            candidates = binding.get("candidate_launch_executables", [])
+            if isinstance(candidates, list):
+                paths.extend(candidates)
+            # A repeated download ID and historical launch paths both protect
+            # this folder until their individual records are explicitly released.
+            if bound_id == installation_id or any(
+                isinstance(value, str) and value
+                and _is_within(Path(value).resolve(), target)
+                for value in paths
+            ):
+                references[key] = binding
+        return references
+
+    def _validate_binding_removal_confirmation(
+        self, references: dict[str, dict[str, Any]], force_bindings: Any,
+    ) -> None:
+        if force_bindings is None:
+            if references:
+                raise TrainerDeckError(
+                    "这个修改器仍有游戏绑定或待恢复启动项，"
+                    "请先解除绑定并恢复启动项再清理"
+                )
+            return
+        if not isinstance(force_bindings, list):
+            raise TrainerDeckError("强制清理绑定快照无效")
+        confirmed: dict[str, dict[str, Any]] = {}
+        for snapshot in force_bindings:
+            if (
+                not isinstance(snapshot, dict)
+                or type(snapshot.get("app_id")) is not int
+                or not 0 < snapshot["app_id"] < 2 ** 32
+                or not isinstance(snapshot.get("installation_id"), str)
+                or not isinstance(snapshot.get("bound_at"), str)
+            ):
+                raise TrainerDeckError("强制清理绑定快照无效")
+            key = str(snapshot["app_id"])
+            if key in confirmed:
+                raise TrainerDeckError("强制清理绑定快照重复")
+            confirmed[key] = {field: snapshot[field] for field in ("app_id", "installation_id", "bound_at")}
+        current = {key: self._binding_snapshot(key, binding) for key, binding in references.items()}
+        if current != confirmed:
+            raise TrainerDeckError("绑定记录已变化，请刷新后重新确认强制删除")
+
     @_serialized_state
-    def delete_installation(self, installation_id: str, folder: str) -> bool:
+    def delete_installation(
+        self, installation_id: str, folder: str,
+        force_bindings: list[dict[str, Any]] | None = None,
+    ) -> bool:
         """Delete the exact managed installation, never a parent or a matching ID elsewhere."""
         if not isinstance(installation_id, str) or not re.fullmatch(
             r"[0-9a-f]{24}", installation_id,
@@ -1453,43 +1541,9 @@ class TrainerDeckCore:
                 or not executable.is_file()
             ):
                 raise TrainerDeckError("修改器 EXE 必须位于选中的安装目录内")
-            # Fail closed when recovery metadata cannot be read: its absence is
-            # different from a malformed file that may hide an active binding.
-            if self.bindings_path.exists():
-                bindings = json.loads(self.bindings_path.read_text(encoding="utf-8"))
-                if not isinstance(bindings, dict):
-                    raise TrainerDeckError("无法确认绑定状态，暂不能清理")
-            else:
-                bindings = {}
-            for binding in bindings.values():
-                if not isinstance(binding, dict):
-                    raise TrainerDeckError("无法确认绑定状态，暂不能清理")
-                if (
-                    binding.get("active", True) is False
-                    and binding.get("launch_options_restored") is True
-                ):
-                    continue
-                bound_id = binding.get("installation_id") or binding.get("id")
-                if not isinstance(bound_id, str) or not bound_id:
-                    raise TrainerDeckError("无法确认绑定状态，暂不能清理")
-                paths = [
-                    binding.get("installation_folder"),
-                    binding.get("managed_launch_executable"),
-                ]
-                candidates = binding.get("candidate_launch_executables", [])
-                if isinstance(candidates, list):
-                    paths.extend(candidates)
-                # IDs can refer to repeated downloads. Conservatively protect
-                # every copy until its active binding is removed.
-                if bound_id == installation_id or any(
-                    isinstance(value, str) and value
-                    and _is_within(Path(value).resolve(), target)
-                    for value in paths
-                ):
-                    raise TrainerDeckError(
-                        "这个修改器仍有游戏绑定或待恢复启动项，"
-                        "请先解除绑定并恢复启动项再清理"
-                    )
+            bindings = self._strict_bindings()
+            references = self._installation_binding_references(installation_id, target, bindings)
+            self._validate_binding_removal_confirmation(references, force_bindings)
             target_device = target.stat().st_dev
 
             # Decky runs on Linux. Keep this independent of bridge startup so
@@ -1513,7 +1567,24 @@ class TrainerDeckCore:
                         raise TrainerDeckError("安装目录包含外部关联文件，无法安全清理")
                     if path != metadata_path and path.name == METADATA_FILENAME:
                         raise TrainerDeckError("安装目录包含其他安装记录，无法安全清理")
+            # Re-read after potentially slow process and filesystem inspection.
+            # Every new reference needs a fresh confirmation, while unrelated
+            # records must be preserved. Core writers share this transaction lock.
+            bindings = self._strict_bindings()
+            references = self._installation_binding_references(installation_id, target, bindings)
+            self._validate_binding_removal_confirmation(references, force_bindings)
             shutil.rmtree(target)
+            if references:
+                remaining = {key: value for key, value in bindings.items() if key not in references}
+                try:
+                    _atomic_write_json(self.bindings_path, remaining)
+                except OSError as error:
+                    # Never release binding ownership before deletion succeeds.
+                    # An unsuccessful persistence leaves the old recovery data
+                    # intact; it can still be explicitly forgotten afterwards.
+                    raise TrainerDeckError(
+                        "修改器文件已删除，但绑定记录保存失败；请刷新后强制移除残留绑定"
+                    ) from error
         except (OSError, ValueError) as error:
             raise TrainerDeckError(f"无法安全清理这个修改器：{error}") from error
         return True
@@ -1934,3 +2005,30 @@ class TrainerDeckCore:
             bindings[key] = value
             _atomic_write_json(self.bindings_path, bindings)
         return removed
+
+    @_serialized_state
+    def forget_trainer_binding(
+        self, app_id: int, expected_installation_id: str, expected_bound_at: str,
+    ) -> bool:
+        """Explicitly discard one confirmed record without claiming recovery."""
+        if type(app_id) is not int or not 0 < app_id < 2 ** 32:
+            raise TrainerDeckError("Steam AppID 无效")
+        if not isinstance(expected_installation_id, str) or not isinstance(expected_bound_at, str):
+            raise TrainerDeckError("绑定记录快照无效")
+        bindings = self._strict_bindings()
+        key = str(app_id)
+        if key not in bindings:
+            return False
+        value = bindings[key]
+        if not isinstance(value, dict):
+            raise TrainerDeckError("无法确认绑定状态，请修复绑定记录后重试")
+        expected = {
+            "app_id": app_id,
+            "installation_id": expected_installation_id,
+            "bound_at": expected_bound_at,
+        }
+        if self._binding_snapshot(key, value) != expected:
+            raise TrainerDeckError("绑定记录已变化，请刷新后重新确认强制移除")
+        del bindings[key]
+        _atomic_write_json(self.bindings_path, bindings)
+        return True

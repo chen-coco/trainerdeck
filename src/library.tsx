@@ -18,7 +18,12 @@ import {
   installationMatchesQuery,
   installationReferences,
 } from "./library-state";
-import type { InstalledTrainer, SteamTarget, TrainerBindingRecord } from "./types";
+import type {
+  InstalledTrainer,
+  SteamTarget,
+  TrainerBindingIdentity,
+  TrainerBindingRecord,
+} from "./types";
 
 const READ_TIMEOUT_MS = 8000;
 export const LIBRARY_ROUTE = "/trainerdeck/library";
@@ -47,6 +52,25 @@ function targetKey(target: SteamTarget | null): string {
   ]);
 }
 
+function bindingIdentity(record: TrainerBindingRecord): TrainerBindingIdentity {
+  return {
+    app_id: record.app_id,
+    installation_id: record.installation_id,
+    bound_at: record.bound_at,
+  };
+}
+
+function bindingSnapshotKey(records: TrainerBindingRecord[]): string {
+  return JSON.stringify(records.map((record) => JSON.stringify([
+    record.app_id, record.installation_id, record.bound_at,
+  ])).sort());
+}
+
+interface DeleteConfirmation {
+  key: string;
+  bindings: TrainerBindingRecord[];
+}
+
 async function readLibrary(): Promise<{
   installations: InstalledTrainer[];
   bindings: TrainerBindingRecord[];
@@ -70,11 +94,11 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
   const [loadError, setLoadError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [operation, setOperation] = useState<string | null>(null);
-  const [confirmation, setConfirmation] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<DeleteConfirmation | null>(null);
   const mounted = useRef(false);
   const request = useRef(0);
   const operationLock = useRef(false);
-  const pendingDelete = useRef<string | null>(null);
+  const pendingDelete = useRef<DeleteConfirmation | null>(null);
   const latest = useRef({ ...props, expanded, status, bindings });
   latest.current = { ...props, expanded, status, bindings };
 
@@ -179,7 +203,8 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
   }, [beginOperation, finishOperation, load]);
 
   const remove = useCallback(async (installation: InstalledTrainer) => {
-    if (pendingDelete.current !== installationKey(installation)) return;
+    const accepted = pendingDelete.current;
+    if (accepted?.key !== installationKey(installation)) return;
     if (!beginOperation(`delete:${installationKey(installation)}`)) {
       if (mounted.current && !operationLock.current) reportDeleteError(t(
         "确认期间修改器库状态已变化，请刷新后重试。",
@@ -193,10 +218,11 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
     setConfirmation(null);
     try {
       const loaded = await readLibrary();
-      if (installationReferences(installation, loaded.bindings).length > 0) {
+      const references = installationReferences(installation, loaded.bindings);
+      if (bindingSnapshotKey(references) !== bindingSnapshotKey(accepted.bindings)) {
         throw new Error(t(
-          "此修改器仍被游戏启动项引用，请先在“游戏启动项恢复”中解除绑定。",
-          "Game launch options still refer to this trainer. Unbind it in Launch Option Recovery first.",
+          "确认期间关联游戏或绑定记录已变化，请刷新后重新确认删除。",
+          "The game references or binding records changed while confirmation was open. Refresh and confirm deletion again.",
         ));
       }
       if (!latest.current.backendReady || latest.current.busy) {
@@ -204,10 +230,18 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
       }
       // Do not time out a filesystem mutation and unlock other operations while
       // the backend could still be deleting the directory.
-      const deleted = await deleteInstallation(installation.id, installation.folder);
+      const deleted = accepted.bindings.length > 0
+        ? await deleteInstallation(
+            installation.id,
+            installation.folder,
+            accepted.bindings.map(bindingIdentity),
+          )
+        : await deleteInstallation(installation.id, installation.folder);
       if (!deleted) throw new Error(t("未能删除修改器，请刷新后重试。", "The trainer was not deleted. Refresh and retry."));
       if (mounted.current) {
-        setActionMessage(t("已删除本地修改器文件。", "Local trainer files deleted."));
+        setActionMessage(accepted.bindings.length > 0
+          ? t("已强制解除关联并删除本地修改器文件。", "Bindings removed and local trainer files deleted.")
+          : t("已删除本地修改器文件。", "Local trainer files deleted."));
         setDetails((current) => current === installationKey(installation) ? null : current);
       }
       toaster.toast({ title: t("删除完成", "Trainer deleted"), body: installation.title || installation.game_name });
@@ -229,16 +263,10 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
       return;
     }
     const protectedBindings = installationReferences(installation, latest.current.bindings);
-    if (protectedBindings.length > 0) {
-      const names = protectedBindings.map((record) => record.display_name || record.title).filter(Boolean).join("、");
-      setDetails(installationKey(installation));
-      reportDeleteError(t(
-        `此修改器仍被${names ? `“${names}”` : "游戏"}的启动项引用。请先退出游戏，并在下方“管理与恢复启动项”中解除绑定，再返回删除。`,
-        `Launch options${names ? ` for ${names}` : ""} still refer to this trainer. Exit the game and unbind it using Manage and Restore Launch Options below, then return to delete it.`,
-      ));
-      return;
-    }
-    pendingDelete.current = installationKey(installation);
+    pendingDelete.current = {
+      key: installationKey(installation),
+      bindings: protectedBindings.map((record) => ({ ...record })),
+    };
     setConfirmation(pendingDelete.current);
     setActionMessage("");
   }, [reportDeleteError]);
@@ -332,7 +360,7 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
                       {operation === `delete:${key}` ? t("正在删除…", "Deleting…") : t("删除文件", "Delete Files")}
                     </DialogButton>
                   </Focusable>
-                  {confirmation === key && (
+                  {confirmation?.key === key && (
                     <div role="group" aria-label={t("确认删除本地修改器", "Confirm local trainer deletion")} style={{ border: "1px solid #d9a34b", borderRadius: "4px", padding: "10px", marginBottom: "10px", fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }}>
                       <div style={{ fontWeight: 600 }}>{t("删除本地修改器？", "Delete local trainer?")}</div>
                       <div>{installation.title || installation.game_name} · {installation.version || t("版本未知", "Unknown version")}</div>
@@ -341,9 +369,21 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
                         "将永久删除此目录中的修改器及相关本地文件，无法撤销。之后可重新下载。",
                         "This permanently deletes the trainer and related local files in this folder. This cannot be undone. You can download it again later.",
                       )}</p>
+                      {confirmation.bindings.length > 0 && <>
+                        <div>{t("将强制解除以下游戏的绑定并删除记录：", "Force-remove bindings and records for these games:")}</div>
+                        {confirmation.bindings.map((record) => (
+                          <div key={record.app_id}>{record.display_name || record.title || `App ${record.app_id}`} · AppID {record.app_id}</div>
+                        ))}
+                        <p>{t(
+                          "用于游戏已删除或旧快捷方式失效时清理。不会恢复这些游戏的原启动项；如果游戏仍存在，请先正常恢复启动项。请先退出使用此修改器的游戏和修改器进程。",
+                          "Use this when the game was deleted or its old shortcut no longer works. Original launch options will not be restored. If the game still exists, restore its launch options first. Exit games and trainer processes using these files before deleting.",
+                        )}</p>
+                      </>}
                       <Focusable style={{ display: "flex", gap: "8px" }}>
                         <DialogButton style={{ minWidth: 0, flex: 1 }} disabled={operation !== null} onClick={() => void remove(installation)}>
-                          {t("永久删除", "Delete permanently")}
+                          {confirmation.bindings.length > 0
+                            ? t("强制解绑并删除", "Force Unbind and Delete")
+                            : t("永久删除", "Delete permanently")}
                         </DialogButton>
                         <DialogButton style={{ minWidth: 0, flex: 1 }} disabled={operation !== null} onClick={cancelDelete}>
                           {t("取消", "Cancel")}
@@ -353,7 +393,7 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
                   )}
                   {protectedBindings.length > 0 && (
                     <div style={{ fontSize: "12px", lineHeight: 1.5, marginBottom: "10px" }}>
-                      {t("仍有游戏启动项引用；需先退出游戏并解除绑定，再删除文件。", "Game launch options still use these files. Exit the game and unbind before deleting.")}
+                      {t("仍有游戏启动项引用。游戏已删除时，可通过“删除文件”强制解除关联并删除。", "Game launch options still use these files. If the game was deleted, use Delete Files to force-remove its bindings and delete the files.")}
                     </div>
                   )}
                   {details === key && (
@@ -361,7 +401,7 @@ export function TrainerLibrary(props: TrainerLibraryProps) {
                       <div>{t("目录：", "Folder: ")}{installation.folder}</div>
                       <div>{t("程序：", "Executable: ")}{installation.executable}</div>
                       {installation.installed_at && <div>{t("下载时间：", "Downloaded: ")}{installation.installed_at}</div>}
-                      {protectedBindings.length > 0 && <div>{t("解除绑定并恢复启动项后，才能删除文件。", "Unbind and restore launch options before deleting these files.")}</div>}
+                      {protectedBindings.length > 0 && <div>{t("游戏仍存在时，建议先解除绑定并恢复启动项，再删除文件。", "If the game still exists, restore its launch options and unbind it before deleting these files.")}</div>}
                     </div>
                   )}
                 </PanelSectionRow>

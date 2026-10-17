@@ -130,6 +130,123 @@ class LibraryCoreTests(unittest.TestCase):
                     self.core.delete_installation(selected["id"], selected["folder"])
                 self.assertTrue(Path(selected["executable"]).is_file())
 
+    def snapshot(self, app_id):
+        record = next(row for row in self.core.list_binding_records() if row["app_id"] == app_id)
+        return {key: record[key] for key in ("app_id", "installation_id", "bound_at")}
+
+    def test_forget_deleted_game_releases_installation_for_new_app_id(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"], installation_folder=selected["folder"])
+        self.write_json(self.core.bindings_path, {
+            **json.loads(self.core.bindings_path.read_text(encoding="utf-8")),
+            "99": {"installation_id": "unrelated", "active": False, "launch_options_restored": True},
+        })
+        before = json.loads(self.core.bindings_path.read_text(encoding="utf-8"))["99"]
+        snapshot = self.snapshot(12)
+        with self.assertRaisesRegex(TrainerDeckError, "AppID 12"):
+            self.core.bind_trainer(13, selected["id"])
+        self.assertTrue(self.core.forget_trainer_binding(12, snapshot["installation_id"], snapshot["bound_at"]))
+        self.assertFalse(self.core.forget_trainer_binding(12, snapshot["installation_id"], snapshot["bound_at"]))
+        self.assertTrue(Path(selected["executable"]).is_file())
+        self.assertEqual(json.loads(self.core.bindings_path.read_text(encoding="utf-8")), {"99": before})
+        self.assertEqual(self.core.bind_trainer(13, selected["id"])["app_id"], 13)
+
+    def test_forget_inactive_record_does_not_require_game_or_trainer_files(self):
+        self.write_json(self.core.bindings_path, {
+            "12": {"id": "missing-installation", "active": False, "launch_options_restored": False},
+        })
+        self.assertTrue(self.core.forget_trainer_binding(12, "missing-installation", ""))
+        self.assertEqual(self.core.list_binding_records(), [])
+
+    def test_forget_stale_invalid_or_corrupt_state_preserves_original_data(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        before = self.core.bindings_path.read_bytes()
+        for arguments in [
+            (12, "different", ""), (12, selected["id"], "old-timestamp"),
+            (True, selected["id"], ""), (0, selected["id"], ""),
+            (2 ** 32, selected["id"], ""), (12, selected["id"], None),
+        ]:
+            with self.subTest(arguments=arguments), self.assertRaises(TrainerDeckError):
+                self.core.forget_trainer_binding(*arguments)
+            self.assertEqual(self.core.bindings_path.read_bytes(), before)
+        for broken in ["broken-json", "[]", '{"12": null}']:
+            self.core.bindings_path.write_text(broken, encoding="utf-8")
+            with self.assertRaises(TrainerDeckError):
+                self.core.forget_trainer_binding(12, selected["id"], "")
+            self.assertEqual(self.core.bindings_path.read_text(encoding="utf-8"), broken)
+
+    def test_force_delete_requires_exact_confirmed_references_and_preserves_other_records(self):
+        selected = self.install()
+        other = self.install("v2", "c" * 24)
+        records = {
+            "12": {"installation_id": selected["id"], "installation_folder": selected["folder"], "active": True, "bound_at": "first"},
+            "13": {"installation_id": other["id"], "candidate_launch_executables": [selected["executable"]], "active": False, "launch_options_restored": False, "bound_at": "second"},
+            "14": {"installation_id": selected["id"], "active": False, "launch_options_restored": True},
+            "15": {"installation_id": other["id"], "installation_folder": other["folder"], "active": True},
+        }
+        self.write_json(self.core.bindings_path, records)
+        confirmed = [self.snapshot(12), self.snapshot(13)]
+        before = self.core.bindings_path.read_bytes()
+        for confirmation in [
+            None, [], confirmed[:1], confirmed + [self.snapshot(15)],
+            [dict(confirmed[0], bound_at="stale"), confirmed[1]],
+            [dict(confirmed[0], installation_id="changed"), confirmed[1]],
+            confirmed + [confirmed[0]], "yes", [{"app_id": True}],
+        ]:
+            with self.subTest(confirmation=confirmation), self.assertRaises(TrainerDeckError):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmation)
+            self.assertEqual(self.core.bindings_path.read_bytes(), before)
+            self.assertTrue(Path(selected["executable"]).is_file())
+        self.assertTrue(self.core.delete_installation(selected["id"], selected["folder"], confirmed))
+        self.assertFalse(Path(selected["folder"]).exists())
+        self.assertTrue(Path(other["executable"]).is_file())
+        self.assertEqual(json.loads(self.core.bindings_path.read_text(encoding="utf-8")), {key: records[key] for key in ("14", "15")})
+
+    def test_force_delete_retains_records_when_process_or_filesystem_checks_fail(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        before = self.core.bindings_path.read_bytes()
+        with patch.object(self.core, "_assert_installation_not_running", side_effect=TrainerDeckError("仍在运行")):
+            with self.assertRaisesRegex(TrainerDeckError, "仍在运行"):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmed)
+        with patch("trainerdeck_core.shutil.rmtree", side_effect=PermissionError("cannot delete")):
+            with self.assertRaisesRegex(TrainerDeckError, "cannot delete"):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmed)
+        with self.assertRaisesRegex(TrainerDeckError, "具体修改器版本"):
+            self.core.delete_installation(selected["id"], str(self.home), confirmed)
+        self.assertEqual(self.core.bindings_path.read_bytes(), before)
+        self.assertTrue(Path(selected["executable"]).is_file())
+
+    def test_force_delete_rechecks_references_added_during_inspection(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        records = json.loads(self.core.bindings_path.read_text(encoding="utf-8"))
+        records["13"] = {"installation_id": "other", "candidate_launch_executables": [selected["executable"]], "bound_at": "new"}
+
+        def add_reference(*args, **kwargs):
+            self.write_json(self.core.bindings_path, records)
+
+        with patch.object(self.core, "_assert_installation_not_running", side_effect=add_reference):
+            with self.assertRaisesRegex(TrainerDeckError, "记录已变化"):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmed)
+        self.assertTrue(Path(selected["executable"]).is_file())
+        self.assertEqual(json.loads(self.core.bindings_path.read_text(encoding="utf-8")), records)
+
+    def test_force_delete_persistence_failure_preserves_recovery_records(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        before = self.core.bindings_path.read_bytes()
+        with patch("trainerdeck_core._atomic_write_json", side_effect=PermissionError("read-only")):
+            with self.assertRaisesRegex(TrainerDeckError, "文件已删除.*记录保存失败"):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmed)
+        self.assertFalse(Path(selected["folder"]).exists())
+        self.assertEqual(self.core.bindings_path.read_bytes(), before)
+        self.assertTrue(self.core.forget_trainer_binding(12, confirmed[0]["installation_id"], confirmed[0]["bound_at"]))
+
     def test_binding_duplicate_download_keeps_the_exact_selected_folder(self):
         selected = self.install()
         duplicate = self.install("v1-2")
@@ -376,6 +493,20 @@ class LibraryRuntimeTests(unittest.IsolatedAsyncioTestCase):
         called = []
         self.manager.delete_unused_installation(str(self.folder), lambda: called.append(True))
         self.assertEqual(called, [True])
+
+    async def test_bridge_binding_requires_matching_live_preparation_and_token(self):
+        prepared = self.manager.prepare_bridge(12, self.installation)
+        self.manager.validate_prepared_binding(12, self.installation["id"], prepared["launch_executable"])
+        for installation_id, executable in [
+            ("different-installation", prepared["launch_executable"]),
+            (self.installation["id"], str(self.folder / "other.exe")),
+        ]:
+            with self.subTest(installation_id=installation_id, executable=executable):
+                with self.assertRaisesRegex(TrainerRuntimeError, "准备状态已变化"):
+                    self.manager.validate_prepared_binding(12, installation_id, executable)
+        with patch.dict(self.manager._tokens, {}, clear=True):
+            with self.assertRaisesRegex(TrainerRuntimeError, "准备状态已变化"):
+                self.manager.validate_prepared_binding(12, self.installation["id"], prepared["launch_executable"])
 
     async def test_connected_trainer_is_still_protected(self):
         self.manager.prepare_bridge(12, self.installation)

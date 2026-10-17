@@ -1,9 +1,9 @@
 import { toaster } from "@decky/api";
-import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
+import { ButtonItem, DialogButton, Focusable, PanelSection, PanelSectionRow } from "@decky/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { withTimeout } from "./async";
-import { listBindings, unbindTrainer } from "./backend";
+import { forgetTrainerBinding, listBindings, unbindTrainer } from "./backend";
 import { t } from "./i18n";
 import {
   readAppDetails,
@@ -180,10 +180,15 @@ export function TrainerDeckRecoveryPage() {
   const [records, setRecords] = useState<TrainerBindingRecord[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState<number | "all" | null>(null);
+  const [busy, setBusy] = useState<number | "all" | `forget:${number}` | null>(null);
+  const [confirmation, setConfirmation] = useState<TrainerBindingRecord | null>(null);
   const loadRequest = useRef(0);
+  const mounted = useRef(false);
+  const operationLock = useRef(false);
+  const pendingForget = useRef<TrainerBindingRecord | null>(null);
 
   const load = useCallback(async () => {
+    if (!mounted.current) return;
     const request = loadRequest.current + 1;
     loadRequest.current = request;
     setStatus("loading");
@@ -197,13 +202,13 @@ export function TrainerDeckRecoveryPage() {
           "Reading launch option recovery records timed out.",
         ),
       );
-      if (loadRequest.current !== request) {
+      if (!mounted.current || loadRequest.current !== request) {
         return;
       }
       setRecords(loaded);
       setStatus("ready");
     } catch (error) {
-      if (loadRequest.current !== request) {
+      if (!mounted.current || loadRequest.current !== request) {
         return;
       }
       setStatus("error");
@@ -212,9 +217,12 @@ export function TrainerDeckRecoveryPage() {
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void load();
     return () => {
+      mounted.current = false;
       loadRequest.current += 1;
+      pendingForget.current = null;
     };
   }, [load]);
 
@@ -224,9 +232,10 @@ export function TrainerDeckRecoveryPage() {
   );
 
   const restoreOne = useCallback(async (record: TrainerBindingRecord) => {
-    if (busy !== null) {
+    if (operationLock.current || !mounted.current) {
       return;
     }
+    operationLock.current = true;
     setBusy(record.app_id);
     try {
       await restoreTrainerLaunchBinding(record);
@@ -244,14 +253,16 @@ export function TrainerDeckRecoveryPage() {
         body: errorText(error),
       });
     } finally {
-      setBusy(null);
+      operationLock.current = false;
+      if (mounted.current) setBusy(null);
     }
-  }, [busy, load]);
+  }, [load]);
 
   const restoreAll = useCallback(async () => {
-    if (busy !== null || pendingRecords.length === 0) {
+    if (operationLock.current || !mounted.current || pendingRecords.length === 0) {
       return;
     }
+    operationLock.current = true;
     setBusy("all");
     const failed: string[] = [];
     let restored = 0;
@@ -284,9 +295,58 @@ export function TrainerDeckRecoveryPage() {
       });
       await load();
     } finally {
-      setBusy(null);
+      operationLock.current = false;
+      if (mounted.current) setBusy(null);
     }
-  }, [busy, load, pendingRecords]);
+  }, [load, pendingRecords]);
+
+  const confirmForget = useCallback((record: TrainerBindingRecord) => {
+    if (operationLock.current || !mounted.current) return;
+    pendingForget.current = { ...record };
+    setConfirmation(pendingForget.current);
+    setMessage("");
+  }, []);
+
+  const cancelForget = useCallback(() => {
+    pendingForget.current = null;
+    setConfirmation(null);
+  }, []);
+
+  const forgetOne = useCallback(async () => {
+    const record = pendingForget.current;
+    if (!record || operationLock.current || !mounted.current) return;
+    operationLock.current = true;
+    pendingForget.current = null;
+    setConfirmation(null);
+    setBusy(`forget:${record.app_id}`);
+    setMessage("");
+    try {
+      // Explicitly forgetting a deleted target does not read or write Steam.
+      // Keep the lock until the mutation settles, even after leaving the page.
+      const forgotten = await forgetTrainerBinding(
+        record.app_id,
+        record.installation_id,
+        record.bound_at,
+      );
+      if (!forgotten) {
+        throw new Error(t("绑定记录已变化或不存在，请刷新后重试。", "The binding record changed or no longer exists. Refresh and retry."));
+      }
+      toaster.toast({
+        title: t("已强制解除绑定", "Binding record removed"),
+        body: t(
+          `${recordName(record)}：修改器文件已保留，未修改 Steam 启动项。`,
+          `${recordName(record)}: trainer files were preserved. Steam launch options were not changed.`,
+        ),
+      });
+      await load();
+    } catch (error) {
+      if (mounted.current) setMessage(errorText(error));
+      toaster.toast({ title: t("强制解除绑定失败", "Could not remove binding record"), body: errorText(error) });
+    } finally {
+      operationLock.current = false;
+      if (mounted.current) setBusy(null);
+    }
+  }, [load]);
 
   return (
     <div
@@ -343,6 +403,9 @@ export function TrainerDeckRecoveryPage() {
       </PanelSection>
 
       <PanelSection title={t("游戏记录", "Game Records")}>
+        {status === "ready" && message && <PanelSectionRow>
+          <div role="alert" style={{ fontSize: "12px", lineHeight: 1.5 }}>{message}</div>
+        </PanelSectionRow>}
         {status === "ready" && records.length === 0 && (
           <PanelSectionRow>
             <div style={{ fontSize: "12px", opacity: 0.78 }}>
@@ -391,6 +454,39 @@ export function TrainerDeckRecoveryPage() {
                     `Restore ${recordName(record)}`,
                   )}
             </ButtonItem>
+            <ButtonItem
+              layout="below"
+              description={t(
+                "游戏已删除或旧快捷方式失效时，可删除绑定记录并保留修改器文件。此操作无法恢复原启动项。",
+                "If the game was deleted or its old shortcut no longer works, remove the binding record and keep trainer files. This cannot restore the original launch options.",
+              )}
+              disabled={busy !== null}
+              onClick={() => confirmForget(record)}
+            >
+              {busy === `forget:${record.app_id}`
+                ? t("正在强制解除…", "Removing binding record…")
+                : t("强制解除绑定 / 删除记录", "Force Unbind / Remove Record")}
+            </ButtonItem>
+            {confirmation?.app_id === record.app_id && <div
+              role="group"
+              aria-label={t("确认强制解除绑定", "Confirm forced unbinding")}
+              style={{ border: "1px solid #d9a34b", borderRadius: "4px", padding: "10px", margin: "8px 0 12px", fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }}
+            >
+              <div>{recordName(confirmation)} · AppID {confirmation.app_id}</div>
+              {confirmation.shortcut_exe && <div>{confirmation.shortcut_exe}</div>}
+              <p>{t(
+                "将删除此绑定记录并保留修改器文件，不会恢复或修改 Steam 启动项。适用于游戏已删除或旧快捷方式失效；如果游戏仍存在，建议先正常恢复启动项。删除后可将修改器重新绑定到新游戏。",
+                "This removes the binding record and keeps trainer files, without restoring or changing Steam launch options. Use it for a deleted game or an invalid old shortcut. If the game still exists, restore its launch options first. You can then bind the trainer to your new game.",
+              )}</p>
+              <Focusable style={{ display: "flex", gap: "8px" }}>
+                <DialogButton style={{ minWidth: 0, flex: 1 }} disabled={busy !== null} onClick={() => void forgetOne()}>
+                  {t("强制解除（保留文件）", "Remove Record (Keep Files)")}
+                </DialogButton>
+                <DialogButton style={{ minWidth: 0, flex: 1 }} disabled={busy !== null} onClick={cancelForget}>
+                  {t("取消", "Cancel")}
+                </DialogButton>
+              </Focusable>
+            </div>}
           </PanelSectionRow>
         ))}
       </PanelSection>

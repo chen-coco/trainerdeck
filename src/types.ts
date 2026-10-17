@@ -98,6 +98,11 @@ export interface TrainerBindingRecord {
   unbound_at: string;
 }
 
+export type TrainerBindingIdentity = Pick<
+  TrainerBindingRecord,
+  "app_id" | "installation_id" | "bound_at"
+>;
+
 export interface SearchResponse {
   items: TrainerEntry[];
   warnings: string[];

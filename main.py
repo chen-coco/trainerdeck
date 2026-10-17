@@ -16,7 +16,7 @@ try:
 except ImportError:  # Older Decky Loader releases exposed only this alias.
     import decky_plugin as decky
 
-from trainerdeck_core import TrainerDeckCore
+from trainerdeck_core import TrainerDeckCore, TrainerDeckError
 
 if TYPE_CHECKING:
     from trainerdeck_runtime import TrainerRuntimeManager
@@ -163,7 +163,7 @@ class Plugin:
                 pass
         return {
             "ok": self.core is not None,
-            "version": "0.8.1",
+            "version": "0.8.3",
             "python_version": sys.version.split()[0],
             "core_ready": self.core is not None,
             "core_error": self.core_start_error,
@@ -200,18 +200,37 @@ class Plugin:
         core = self._ensure_core()
         return await asyncio.to_thread(core.list_installed)
 
-    async def delete_installation(self, installation_id: str, folder: str):
+    async def delete_installation(
+        self, installation_id: str, folder: str,
+        force_bindings: list[dict] | None = None,
+    ):
         core = self._ensure_core()
 
         def remove():
-            return core.delete_installation(installation_id, folder)
+            # A historical candidate path can reference this folder while the
+            # same binding now runs another version. Do not revoke its live
+            # connection as a side effect of forcing the old files away.
+            if self.runtime is not None and isinstance(force_bindings, list):
+                for snapshot in force_bindings:
+                    if (
+                        isinstance(snapshot, dict)
+                        and type(snapshot.get("app_id")) is int
+                        and self.runtime.get_snapshot(snapshot["app_id"]).get("connected")
+                    ):
+                        raise TrainerDeckError("关联修改器仍在运行，请退出游戏和修改器后再清理")
+            return core.delete_installation(installation_id, folder, force_bindings)
 
         async with self._installation_operation_lock:
             if self.runtime is not None:
-                return await asyncio.to_thread(
+                removed = await asyncio.to_thread(
                     self.runtime.delete_unused_installation, folder, remove,
                 )
-            return await asyncio.to_thread(remove)
+            else:
+                removed = await asyncio.to_thread(remove)
+            if removed and self.runtime_started and self.runtime is not None:
+                for snapshot in force_bindings or []:
+                    await self.runtime.revoke_app(snapshot["app_id"])
+            return removed
 
     async def get_option_favorites(self, app_id: int, trainer_sha256: str):
         return await asyncio.to_thread(
@@ -244,31 +263,51 @@ class Plugin:
         launch_options_field: str = "",
         installation_folder: str = "",
     ):
-        return self._ensure_core().bind_trainer(
-            app_id,
-            installation_id,
-            managed_launch_executable,
-            original_launch_options,
-            applied_launch_options,
-            display_name,
-            target_type,
-            shortcut_exe,
-            launch_options_field,
-            installation_folder,
-        )
+        async with self._installation_operation_lock:
+            if (
+                managed_launch_executable
+                and Path(managed_launch_executable).name.casefold() == "trainerdeckbridgelauncher.exe"
+            ):
+                self._require_runtime().validate_prepared_binding(
+                    app_id, installation_id, managed_launch_executable,
+                )
+            return self._ensure_core().bind_trainer(
+                app_id,
+                installation_id,
+                managed_launch_executable,
+                original_launch_options,
+                applied_launch_options,
+                display_name,
+                target_type,
+                shortcut_exe,
+                launch_options_field,
+                installation_folder,
+            )
 
     async def unbind_trainer(
         self,
         app_id: int,
         launch_options_restored: bool = False,
     ):
-        removed = self._ensure_core().unbind_trainer(
-            app_id,
-            launch_options_restored,
-        )
-        if self.runtime_started and self.runtime is not None:
-            await self.runtime.revoke_app(app_id)
-        return removed
+        async with self._installation_operation_lock:
+            removed = self._ensure_core().unbind_trainer(
+                app_id,
+                launch_options_restored,
+            )
+            if self.runtime_started and self.runtime is not None:
+                await self.runtime.revoke_app(app_id)
+            return removed
+
+    async def forget_trainer_binding(
+        self, app_id: int, expected_installation_id: str, expected_bound_at: str,
+    ):
+        async with self._installation_operation_lock:
+            removed = self._ensure_core().forget_trainer_binding(
+                app_id, expected_installation_id, expected_bound_at,
+            )
+            if removed and self.runtime_started and self.runtime is not None:
+                await self.runtime.revoke_app(app_id)
+            return removed
 
     async def prepare_trainer_bridge(
         self, app_id: int, installation_id: str, installation_folder: str = "",
