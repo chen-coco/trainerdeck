@@ -6,12 +6,14 @@ Windows does not expose Linux /proc, so these tests do not certify Steam Deck
 process discovery; test_library.py separately exercises that scanner's inputs.
 """
 
+import asyncio
 import hashlib
 import importlib.util
 import json
 import shutil
 import sys
 import tempfile
+import threading
 import types
 import unittest
 import zipfile
@@ -19,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 from trainerdeck_core import METADATA_FILENAME, TrainerDeckError
-from trainerdeck_runtime import BRIDGE_ASSET_FILENAMES, TrainerRuntimeManager
+from trainerdeck_runtime import BRIDGE_ASSET_FILENAMES, TrainerRuntimeError, TrainerRuntimeManager
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -173,6 +175,137 @@ class LibraryRpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.plugin.unbind_trainer(1234, True))
         self.assertTrue(await self.plugin.delete_installation(installed["id"], installed["folder"]))
         self.assertEqual(await self.plugin.list_installed(), [])
+
+    async def binding_snapshot(self, app_id=1234):
+        record = next(row for row in await self.plugin.list_bindings() if row["app_id"] == app_id)
+        return {key: record[key] for key in ("app_id", "installation_id", "bound_at")}
+
+    async def test_force_forget_releases_old_app_runtime_ownership_for_reinstalled_game(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        self.assertIn(1234, self.plugin.runtime._prepared)
+        self.assertTrue(await self.plugin.forget_trainer_binding(
+            1234, snapshot["installation_id"], snapshot["bound_at"],
+        ))
+        self.assertEqual(await self.plugin.list_bindings(), [])
+        self.assertNotIn(1234, self.plugin.runtime._prepared)
+        self.assertNotIn(1234, self.plugin.runtime._tokens)
+        self.assertNotIn(1234, self.plugin.runtime._owned_installations)
+        self.assertTrue(Path(installed["executable"]).is_file())
+        prepared = await self.plugin.prepare_trainer_bridge(5678, installed["id"], installed["folder"])
+        binding = await self.plugin.bind_trainer(
+            5678, installed["id"], prepared["launch_executable"],
+            installation_folder=installed["folder"],
+        )
+        self.assertEqual(binding["app_id"], 5678)
+
+    async def test_force_forget_stale_snapshot_does_not_revoke_preparation(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        with self.assertRaisesRegex(TrainerDeckError, "记录已变化"):
+            await self.plugin.forget_trainer_binding(1234, snapshot["installation_id"], "stale")
+        self.assertIn(1234, self.plugin.runtime._prepared)
+        self.assertIsNotNone(await self.plugin.get_binding(1234))
+
+    async def test_replacing_binding_cannot_commit_preparation_revoked_by_forgetting_old_record(self):
+        old = await self.download("v1")
+        new = await self.download("v2")
+        await self.prepare_and_bind(old)
+        snapshot = await self.binding_snapshot()
+        prepared = await self.plugin.prepare_trainer_bridge(1234, new["id"], new["folder"])
+        await self.plugin.forget_trainer_binding(1234, snapshot["installation_id"], snapshot["bound_at"])
+        with self.assertRaisesRegex(TrainerRuntimeError, "准备状态已变化"):
+            await self.plugin.bind_trainer(1234, new["id"], prepared["launch_executable"], installation_folder=new["folder"])
+        self.assertEqual(await self.plugin.list_bindings(), [])
+        self.assertNotIn(1234, self.plugin.runtime._tokens)
+        prepared = await self.plugin.prepare_trainer_bridge(1234, new["id"], new["folder"])
+        self.assertEqual((await self.plugin.bind_trainer(1234, new["id"], prepared["launch_executable"], installation_folder=new["folder"]))["app_id"], 1234)
+
+    async def test_original_executable_binding_does_not_require_bridge_preparation(self):
+        installed = await self.download()
+        binding = await self.plugin.bind_trainer(1234, installed["id"], installed["executable"], installation_folder=installed["folder"])
+        self.assertEqual(binding["app_id"], 1234)
+        self.assertNotIn(1234, self.plugin.runtime._prepared)
+
+    async def test_force_delete_discards_confirmed_binding_and_runtime_ownership(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        self.assertTrue(await self.plugin.delete_installation(installed["id"], installed["folder"], [snapshot]))
+        self.assertFalse(Path(installed["folder"]).exists())
+        self.assertEqual(await self.plugin.list_bindings(), [])
+        self.assertNotIn(1234, self.plugin.runtime._prepared)
+        self.assertNotIn(1234, self.plugin.runtime._tokens)
+        self.assertNotIn(1234, self.plugin.runtime._owned_installations)
+        self.assertEqual(self.plugin.runtime._installation_owners, {})
+
+    async def test_force_delete_cannot_bypass_connected_or_os_process_protection(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        before = self.plugin._ensure_core().bindings_path.read_bytes()
+        with mock.patch.dict(self.plugin.runtime._sessions, {1234: {"connected": True}}):
+            with self.assertRaisesRegex(TrainerRuntimeError, "仍在运行"):
+                await self.plugin.delete_installation(installed["id"], installed["folder"], [snapshot])
+        with mock.patch.object(self.plugin._ensure_core(), "_assert_installation_not_running", side_effect=TrainerDeckError("Wine 仍在运行")):
+            with self.assertRaisesRegex(TrainerDeckError, "Wine 仍在运行"):
+                await self.plugin.delete_installation(installed["id"], installed["folder"], [snapshot])
+        self.assertEqual(self.plugin._ensure_core().bindings_path.read_bytes(), before)
+        self.assertTrue(Path(installed["executable"]).is_file())
+        self.assertIn(1234, self.plugin.runtime._prepared)
+        self.assertIn(1234, self.plugin.runtime._tokens)
+
+    async def test_force_delete_historical_path_cannot_revoke_connected_new_version(self):
+        old = await self.download("v1")
+        current = await self.download("v2")
+        await self.prepare_and_bind(current)
+        core = self.plugin._ensure_core()
+        records = json.loads(core.bindings_path.read_text(encoding="utf-8"))
+        records["1234"]["candidate_launch_executables"].append(old["executable"])
+        core.bindings_path.write_text(json.dumps(records), encoding="utf-8")
+        snapshot = await self.binding_snapshot()
+        before = core.bindings_path.read_bytes()
+        with mock.patch.dict(self.plugin.runtime._sessions, {1234: {"connected": True}}):
+            with self.assertRaisesRegex(TrainerDeckError, "关联修改器仍在运行"):
+                await self.plugin.delete_installation(old["id"], old["folder"], [snapshot])
+        self.assertTrue(Path(old["executable"]).is_file())
+        self.assertTrue(Path(current["executable"]).is_file())
+        self.assertEqual(core.bindings_path.read_bytes(), before)
+        self.assertIn(1234, self.plugin.runtime._prepared)
+
+    async def test_binding_mutations_wait_for_force_delete_transaction(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        core = self.plugin._ensure_core()
+        remove = core.delete_installation
+        entered = threading.Event()
+        release = threading.Event()
+
+        def paused_delete(*arguments):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("Timed out releasing force deletion")
+            return remove(*arguments)
+
+        with mock.patch.object(core, "delete_installation", side_effect=paused_delete):
+            deleting = asyncio.create_task(self.plugin.delete_installation(installed["id"], installed["folder"], [snapshot]))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+            rebinding = asyncio.create_task(self.plugin.bind_trainer(5678, installed["id"], installation_folder=installed["folder"]))
+            unbinding = asyncio.create_task(self.plugin.unbind_trainer(1234, True))
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(rebinding.done())
+                self.assertFalse(unbinding.done())
+            finally:
+                release.set()
+            self.assertTrue(await deleting)
+            with self.assertRaisesRegex(TrainerDeckError, "找不到已安装修改器"):
+                await rebinding
+            self.assertFalse(await unbinding)
+        self.assertEqual(await self.plugin.list_bindings(), [])
 
     async def test_backend_validation_errors_propagate_and_preserve_the_directory(self):
         installed = await self.download()

@@ -607,6 +607,25 @@ class TrainerRuntimeManager:
         self._bump_revision(numeric_app_id)
         return copy.deepcopy(prepared)
 
+    def validate_prepared_binding(
+        self, app_id: int, installation_id: str, launch_executable: str,
+    ) -> None:
+        """Reject a bridge binding whose preparation was revoked or replaced."""
+        numeric_app_id = int(app_id)
+        with self._prepare_lock:
+            prepared = self._prepared.get(numeric_app_id)
+            if (
+                not self.running or not prepared
+                or prepared.get("supported") is not True
+                or prepared.get("installation_id") != installation_id
+                or not self._tokens.get(numeric_app_id)
+                or os.path.normcase(str(Path(str(prepared.get("launch_executable") or "")).resolve()))
+                != os.path.normcase(str(Path(launch_executable).resolve()))
+            ):
+                raise TrainerRuntimeError(
+                    "修改器同步组件准备状态已变化，请重新添加修改器"
+                )
+
     def delete_unused_installation(self, folder: str, delete: Callable[[], bool]) -> bool:
         """Serialize deletion with preparation; preparation alone is not use."""
         with self._prepare_lock:

@@ -3,6 +3,7 @@ import { callable } from "@decky/api";
 import type {
   BackendStatus,
   InstalledTrainer,
+  TrainerBindingIdentity,
   TrainerBindingRecord,
   TrainerBridgePreparation,
   TrainerDeckSettings,
@@ -27,7 +28,7 @@ export const downloadTrainer = callable<
 export const listInstalled = callable<[], InstalledTrainer[]>("list_installed");
 
 export const deleteInstallation = callable<
-  [installationId: string, folder: string],
+  [installationId: string, folder: string, forceBindings?: TrainerBindingIdentity[]],
   boolean
 >("delete_installation");
 
@@ -70,6 +71,11 @@ export const unbindTrainer = callable<
 >(
   "unbind_trainer",
 );
+
+export const forgetTrainerBinding = callable<
+  [appId: number, expectedInstallationId: string, expectedBoundAt: string],
+  boolean
+>("forget_trainer_binding");
 
 export const prepareTrainerBridge = callable<
   [appId: number, installationId: string, installationFolder?: string],
