@@ -97,6 +97,7 @@ const shared = {
   "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
   "./async": { withTimeout: (promise) => promise },
   "./backend": {},
+  "./errors": { errorText: String },
   "./i18n": { t: (_zh, en) => en, localizedTrainerText: (value) => value?.en || "" },
 };
 const recovery = {

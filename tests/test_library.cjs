@@ -45,6 +45,22 @@ assert.equal(policy.installationReferences(trainer, [{ ...retainedPath, candidat
 global.window = { clearTimeout, setTimeout };
 const asyncHelpers = loadSource("src/async.ts");
 const i18n = { t: (_zh, en) => en };
+const errors = loadSource("src/errors.ts", { "./i18n": i18n });
+const pythonReason = "无法确认修改器或 Wine 进程是否已退出，请关闭游戏和修改器后重试";
+function emptyMessagePyError() {
+  return Object.assign(new Error(""), {
+    name: "Python Exception",
+    pythonTraceback: `Traceback (most recent call last):\n  File \"/home/deck/homebrew/plugins/TrainerDeck/main.py\", line 1, in delete\nException: ${pythonReason}\n\n`,
+  });
+}
+assert.equal(errors.errorText(emptyMessagePyError()), pythonReason, "Decky's empty-message PyError must retain its Python exception reason");
+assert.equal(errors.errorText({ message: "preferred message", pythonTraceback: `Exception: ${pythonReason}` }), "preferred message");
+assert.equal(errors.errorText({ message: "  ", pythonTraceback: ["Traceback:", "ValueError: invalid target", ""] }), "invalid target");
+assert.equal(errors.errorText({ pythonTraceback: "TimeoutError" }), "TimeoutError");
+assert.equal(errors.errorText("ordinary failure"), "ordinary failure");
+for (const opaque of ["", "  ", null, undefined, {}]) {
+  assert.equal(errors.errorText(opaque), "An unknown error occurred. Please retry.");
+}
 
 // A small hook host lets the component's real callbacks run with controlled
 // backend promises. No Decky/Steam runtime or browser DOM is needed.
@@ -106,6 +122,7 @@ function mountLibrary(overrides = {}, backend = {}, recovery = false, steam = {}
     "./async": asyncHelpers,
     "./backend": { listInstalled: async () => [trainer], listBindings: async () => [], deleteInstallation: async () => true, forgetTrainerBinding: async () => true, ...backend },
     "./i18n": i18n,
+    "./errors": errors,
     "./library-state": policy,
     "./steam": {
       readAppDetails: async () => { throw new Error("Steam details unavailable"); },
@@ -159,8 +176,8 @@ function mountLibrary(overrides = {}, backend = {}, recovery = false, steam = {}
     toasts,
     confirmation: () => nodes(tree).find((node) => node.props?.role === "group" && node.props?.["aria-label"] === "Confirm local trainer deletion"),
     confirm: () => click(text(tree).includes("Force Unbind and Delete") ? "Force Unbind and Delete" : "Delete permanently"),
-    confirmForget: () => click("Remove Record (Keep Files)"),
-    forgetConfirmation: () => nodes(tree).find((node) => node.props?.role === "group" && node.props?.["aria-label"] === "Confirm forced unbinding"),
+    confirmForget: () => click("Force Recovery"),
+    forgetConfirmation: () => nodes(tree).find((node) => node.props?.role === "group" && node.props?.["aria-label"] === "Confirm forced recovery"),
     cancel: () => click("Cancel"),
     writesAfterUnmount: () => writesAfterUnmount,
     unmount() { alive = false; slots.forEach((slot) => slot?.cleanup?.()); },
@@ -316,6 +333,18 @@ function deferred() {
   assert.equal(failedDelete.button("Delete Files").disabled, false, "A failed operation must release its lock");
   failedDelete.unmount();
 
+  const emptyMessageDelete = mountLibrary({ alwaysExpanded: true }, {
+    deleteInstallation: async () => { throw emptyMessagePyError(); },
+  });
+  await emptyMessageDelete.flush();
+  emptyMessageDelete.click("Delete Files");
+  emptyMessageDelete.confirm();
+  await emptyMessageDelete.flush();
+  assert.ok(emptyMessageDelete.text().includes(pythonReason), "The library must show the backend reason instead of a blank failure");
+  assert.equal(emptyMessageDelete.toasts.at(-1).body, pythonReason);
+  assert.ok(!emptyMessageDelete.text().includes("Traceback (most recent call last)"), "User-facing failures must not include Python stacks");
+  emptyMessageDelete.unmount();
+
   for (const failAfterUnmount of [false, true]) {
     const preflight = deferred();
     const detachedOperations = [];
@@ -451,6 +480,27 @@ function deferred() {
   assert.equal(detachedForce.writesAfterUnmount(), 0);
   assert.equal(detachedForce.toasts.at(-1).title, "Trainer deleted");
 
+  let restoredRecords = [{ ...binding, candidate_launch_executables: [], original_launch_options: "user parameter" }];
+  let restoredCalls = 0;
+  let unexpectedForgets = 0;
+  const normalRecovery = mountLibrary({}, {
+    listBindings: async () => restoredRecords,
+    unbindTrainer: async () => { restoredCalls++; restoredRecords = []; return true; },
+    forgetTrainerBinding: async () => { unexpectedForgets++; return true; },
+  }, true, {
+    readAppDetails: async () => ({ ...target, appLaunchOptions: "user parameter" }),
+  });
+  await normalRecovery.flush();
+  assert.ok(!normalRecovery.text().includes("Force Recovery"), "The ordinary recovery page must not show a separate force action");
+  normalRecovery.click(`Restore ${binding.display_name}`);
+  await normalRecovery.flush();
+  assert.equal(restoredCalls, 1);
+  assert.equal(unexpectedForgets, 0);
+  assert.equal(normalRecovery.forgetConfirmation(), undefined, "Successful ordinary recovery never offers forced recovery");
+  assert.ok(!normalRecovery.text().includes("Force Recovery"));
+  assert.equal(normalRecovery.toasts.at(-1).title, "Launch options restored");
+  normalRecovery.unmount();
+
   let recoveryRecords = [{ ...binding, title: "Old game", shortcut_exe: "/deleted/game.exe" }];
   let steamReads = 0;
   let normalUnbinds = 0;
@@ -465,24 +515,30 @@ function deferred() {
     readAppDetails: async () => { steamReads++; throw new Error("Reading deleted shortcut timed out"); },
   });
   await recovery.flush();
+  assert.equal(recovery.forgetConfirmation(), undefined);
+  assert.ok(!recovery.text().includes("Force Recovery"));
+  assert.ok(!recovery.text().includes("Force Unbind / Remove Record"));
   recovery.click(`Restore ${binding.display_name}`);
   await recovery.flush();
   assert.equal(steamReads, 1);
   assert.equal(normalUnbinds, 0, "Ordinary recovery must not bypass Steam identity checks");
   assert.equal(recovery.toasts.at(-1).title, "Recovery failed");
-  recovery.click("Force Unbind / Remove Record");
-  assert.ok(recovery.forgetConfirmation());
+  assert.ok(recovery.forgetConfirmation(), "Ordinary failure offers an explicit forced recovery confirmation");
+  assert.ok(recovery.text().includes("Ordinary recovery failed: Reading deleted shortcut timed out"));
   assert.ok(recovery.text().includes("/deleted/game.exe"));
   assert.ok(recovery.text().includes("without restoring or changing Steam launch options"));
   assert.deepEqual(forgotten, []);
   recovery.cancel();
   assert.equal(recovery.forgetConfirmation(), undefined);
   assert.deepEqual(forgotten, [], "Cancelling force-unbind preserves the record");
-  recovery.click("Force Unbind / Remove Record");
+  assert.ok(recovery.text().includes(binding.display_name), "Cancelling forced recovery keeps the game record visible");
+  assert.ok(!recovery.text().includes("Force Recovery"));
+  recovery.click(`Restore ${binding.display_name}`);
+  await recovery.flush();
   recovery.confirmForget();
   await recovery.flush();
   assert.deepEqual(forgotten, [[binding.app_id, binding.installation_id, binding.bound_at]]);
-  assert.equal(steamReads, 1, "Force-unbind never queries the missing game");
+  assert.equal(steamReads, 2, "Only the two ordinary attempts query the missing game; forced recovery does not");
   assert.equal(normalUnbinds, 0, "Force-unbind does not pretend launch options were restored");
   assert.equal(fileDeletes, 0, "Force-unbind always keeps trainer files");
   assert.ok(recovery.text().includes("There are no TrainerDeck launch option records"));
@@ -496,11 +552,9 @@ function deferred() {
   }, true);
   await history.flush();
   assert.equal(history.button(`${binding.display_name} · Restored`).disabled, true);
-  assert.equal(history.button("Force Unbind / Remove Record").disabled, false, "Restored historical records can also be removed");
-  history.click("Force Unbind / Remove Record");
-  history.confirmForget();
-  await history.flush();
-  assert.equal(historyCalls, 1);
+  assert.ok(!history.text().includes("Force Recovery"), "Restored history does not expose an unnecessary force action");
+  assert.equal(history.forgetConfirmation(), undefined);
+  assert.equal(historyCalls, 0);
   history.unmount();
 
   let rejectedCalls = 0;
@@ -513,15 +567,69 @@ function deferred() {
     },
   }, true);
   await rejected.flush();
-  rejected.click("Force Unbind / Remove Record");
+  rejected.click(`Restore ${binding.display_name}`);
+  await rejected.flush();
   rejected.confirmForget();
   await rejected.flush();
   assert.equal(rejectedCalls, 1);
   assert.ok(rejected.text().includes("Binding changed since confirmation"));
   assert.ok(rejected.text().includes(binding.display_name), "Failed force-unbind retains the record");
-  assert.equal(rejected.button("Force Unbind / Remove Record").disabled, false, "Rejected mutations release the operation lock");
+  assert.equal(rejected.button(`Restore ${binding.display_name}`).disabled, false, "Rejected mutations release the operation lock");
+  assert.equal(rejected.forgetConfirmation(), undefined, "A rejected snapshot requires a fresh ordinary recovery before another force confirmation");
   assert.equal(rejected.toasts.at(-1).title, "Could not remove binding record");
   rejected.unmount();
+
+  const emptyMessageRecovery = mountLibrary({}, {
+    listBindings: async () => [binding],
+    forgetTrainerBinding: async () => { throw emptyMessagePyError(); },
+  }, true, {
+    readAppDetails: async () => { throw emptyMessagePyError(); },
+  });
+  await emptyMessageRecovery.flush();
+  emptyMessageRecovery.click(`Restore ${binding.display_name}`);
+  await emptyMessageRecovery.flush();
+  assert.equal(emptyMessageRecovery.toasts.at(-1).body, pythonReason, "Ordinary recovery uses the shared PyError reason");
+  assert.ok(emptyMessageRecovery.text().includes(`Ordinary recovery failed: ${pythonReason}`));
+  emptyMessageRecovery.confirmForget();
+  await emptyMessageRecovery.flush();
+  assert.ok(emptyMessageRecovery.text().includes(pythonReason), "Forced recovery uses the same PyError reason");
+  assert.equal(emptyMessageRecovery.toasts.at(-1).body, pythonReason);
+  assert.ok(!emptyMessageRecovery.text().includes("Traceback (most recent call last)"));
+  emptyMessageRecovery.unmount();
+
+  let missingSnapshotCalls = 0;
+  const missingSnapshot = mountLibrary({}, {
+    listBindings: async () => [binding],
+    forgetTrainerBinding: async () => { missingSnapshotCalls++; return false; },
+  }, true);
+  await missingSnapshot.flush();
+  missingSnapshot.click(`Restore ${binding.display_name}`);
+  await missingSnapshot.flush();
+  assert.equal(missingSnapshotCalls, 0, "An ordinary recovery failure cannot automatically clear bindings");
+  missingSnapshot.confirmForget();
+  await missingSnapshot.flush();
+  assert.equal(missingSnapshotCalls, 1);
+  assert.ok(missingSnapshot.text().includes("binding record changed or no longer exists"));
+  assert.ok(missingSnapshot.text().includes(binding.display_name), "A declined forced recovery retains its displayed record");
+  assert.equal(missingSnapshot.button(`Restore ${binding.display_name}`).disabled, false);
+  missingSnapshot.unmount();
+
+  const ordinaryRead = deferred();
+  let detachedOrdinaryForgets = 0;
+  const detachedOrdinary = mountLibrary({}, {
+    listBindings: async () => [binding],
+    forgetTrainerBinding: async () => { detachedOrdinaryForgets++; return true; },
+  }, true, {
+    readAppDetails: () => ordinaryRead.promise,
+  });
+  await detachedOrdinary.flush();
+  detachedOrdinary.click(`Restore ${binding.display_name}`);
+  assert.equal(detachedOrdinary.forgetConfirmation(), undefined, "Forced recovery is not offered while the normal attempt is pending");
+  detachedOrdinary.unmount();
+  ordinaryRead.reject(new Error("The game is no longer available"));
+  await detachedOrdinary.flush();
+  assert.equal(detachedOrdinaryForgets, 0);
+  assert.equal(detachedOrdinary.writesAfterUnmount(), 0, "A delayed normal failure must not open a confirmation on an unmounted page");
 
   const forgetMutation = deferred();
   let detachedForgets = 0;
@@ -530,8 +638,10 @@ function deferred() {
     forgetTrainerBinding: async () => { detachedForgets++; return forgetMutation.promise; },
   }, true);
   await detachedRecovery.flush();
-  detachedRecovery.click("Force Unbind / Remove Record");
+  detachedRecovery.click(`Restore ${binding.display_name}`);
+  await detachedRecovery.flush();
   detachedRecovery.confirmForget();
+  assert.equal(detachedRecovery.click("Removing binding record…"), false, "A pending forced mutation disables ordinary recovery");
   detachedRecovery.unmount();
   forgetMutation.resolve(true);
   await detachedRecovery.flush();

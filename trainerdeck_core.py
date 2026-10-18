@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-PLUGIN_VERSION = "0.8.3"
+PLUGIN_VERSION = "0.8.4"
 SCHEMA_VERSION = 3
 SETTINGS_FILENAME = "settings.json"
 BINDINGS_FILENAME = "bindings.json"
@@ -1262,14 +1262,25 @@ class TrainerDeckCore:
         # argv still contains this generation directory, derived from the EXE
         # hash (the installation metadata hash instead describes the archive).
         digest = hashlib.sha256()
+        executable_missing = False
+        executable_hash = ""
         try:
             with executable.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(chunk)
+            executable_hash = digest.hexdigest()
+        except FileNotFoundError:
+            # An incomplete installation is still removable. The metadata's
+            # sha256 describes the downloaded archive, not this EXE, so never
+            # use it to exclude a potentially matching cached Wine process.
+            # A retained manifest can describe an older generation as well;
+            # with no EXE, match every cache generation of the same filename.
+            executable_missing = True
         except OSError as error:
             raise TrainerDeckError("无法检查修改器进程，请稍后重试") from error
         cached_executable = re.compile(
-            r"/" + digest.hexdigest()[:16] + r"-a[0-9]+-s[0-9a-f]{16}/"
+            r"/" + (re.escape(executable_hash[:16]) if executable_hash else r"[0-9a-f]{16}")
+            + r"-a[0-9]+-s[0-9a-f]{16}/"
             + re.escape(executable.name.casefold()) + r"(?=$|[\s\x00\"'])"
         )
 
@@ -1311,19 +1322,16 @@ class TrainerDeckCore:
 
             paths: list[str] = []
             inaccessible = False
-            cwd_unreadable = False
             for field in ("exe", "cwd"):
                 try:
                     value = os.readlink(process / field)
                     paths.append(value)
-                    if matches(value):
+                    if matches(value.removesuffix(" (deleted)")):
                         raise TrainerDeckError("这个修改器仍在运行，请退出游戏和修改器后再清理")
                 except FileNotFoundError:
                     continue
                 except OSError:
                     inaccessible = True
-                    if field == "cwd":
-                        cwd_unreadable = True
             try:
                 comm = read_process_file(process / "comm").strip().casefold()
             except OSError:
@@ -1335,6 +1343,11 @@ class TrainerDeckCore:
             plausible_trainer = comm in short_names or any(
                 argument in names for argument in arguments
             )
+            if executable_missing and plausible_trainer:
+                # Without the original EXE its name is the only identity for
+                # ordinary (non-generation-cache) launches. Do not assume a
+                # readable same-name process is unrelated, even without env.
+                raise TrainerDeckError("这个修改器或同名启动器仍在运行，请退出后再清理")
             other_executable = not plausible_trainer and any(
                 argument.endswith(".exe") and argument not in names
                 for argument in arguments
@@ -1372,20 +1385,24 @@ class TrainerDeckCore:
                     continue
                 except OSError:
                     pass
+            # Steam/Proton can deny cwd/environ access for unrelated Wine
+            # helpers even to the same user. With a readable, non-matching
+            # command line those permission errors alone are not evidence
+            # that this installation is in use. Same-name trainers/launchers
+            # and Wine processes with an unreadable command remain protected.
             if (
                 plausible_trainer and (
                     environment_unreadable or (command_unreadable and inaccessible)
                 )
             ) or (
-                wine_process and (
-                    command_unreadable or (cwd_unreadable and environment_unreadable)
-                )
+                wine_process and command_unreadable
             ):
                 # Retry can succeed as soon as this possibly matching process
                 # exits; no permanent in-memory 'was prepared' lock is retained.
                 if process.exists():
                     raise TrainerDeckError(
                         "无法确认修改器或 Wine 进程是否已退出，请关闭游戏和修改器后重试"
+                        f"（PID {process.name}，进程 {comm or 'unknown'}）"
                     )
 
     def _strict_bindings(self) -> dict[str, Any]:
@@ -1477,8 +1494,9 @@ class TrainerDeckCore:
     def delete_installation(
         self, installation_id: str, folder: str,
         force_bindings: list[dict[str, Any]] | None = None,
+        *, dry_run: bool = False,
     ) -> bool:
-        """Delete the exact managed installation, never a parent or a matching ID elsewhere."""
+        """Validate/delete one exact installation; dry runs never remove files or records."""
         if not isinstance(installation_id, str) or not re.fullmatch(
             r"[0-9a-f]{24}", installation_id,
         ):
@@ -1500,12 +1518,42 @@ class TrainerDeckCore:
         ):
             raise TrainerDeckError("只能清理当前下载目录中的具体修改器版本")
         try:
+            if requested != target:
+                raise TrainerDeckError("安装目录不是有效的受管目录")
             self._reject_link(configured_root)
+            target_information = None
             for candidate in (requested, *requested.parents):
-                self._reject_link(candidate)
+                try:
+                    information = self._reject_link(candidate)
+                except FileNotFoundError:
+                    # Check every existing ancestor even when a child has
+                    # already gone. Permission errors and dangling links are
+                    # not proof that this managed installation is absent.
+                    continue
+                if candidate == requested:
+                    target_information = information
                 if candidate == root:
                     break
-            if not target.is_dir() or requested != target:
+            if target_information is None:
+                bindings = self._strict_bindings()
+                references = self._installation_binding_references(installation_id, target, bindings)
+                self._validate_binding_removal_confirmation(references, force_bindings)
+                try:
+                    requested.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise TrainerDeckError("安装目录已重新出现，请刷新后重新确认清理")
+                # No files remain to delete. Only an explicitly confirmed
+                # binding snapshot may be discarded, just as with forgetting
+                # an orphaned game; never mutate records from list_installed.
+                if dry_run:
+                    return True
+                if references:
+                    remaining = {key: value for key, value in bindings.items() if key not in references}
+                    _atomic_write_json(self.bindings_path, remaining)
+                return True
+            if not stat.S_ISDIR(target_information.st_mode):
                 raise TrainerDeckError("安装目录不是有效的受管目录")
             metadata_path = target / METADATA_FILENAME
             metadata_stat = self._reject_link(metadata_path)
@@ -1538,9 +1586,15 @@ class TrainerDeckCore:
                 executable_relative.is_absolute()
                 or ".." in executable_relative.parts
                 or not _is_within(executable.resolve(), target)
-                or not executable.is_file()
             ):
                 raise TrainerDeckError("修改器 EXE 必须位于选中的安装目录内")
+            try:
+                executable_information = self._reject_link(executable)
+            except FileNotFoundError:
+                pass  # Clean up the remaining managed files below.
+            else:
+                if not stat.S_ISREG(executable_information.st_mode):
+                    raise TrainerDeckError("修改器 EXE 必须是安装目录内的普通文件")
             bindings = self._strict_bindings()
             references = self._installation_binding_references(installation_id, target, bindings)
             self._validate_binding_removal_confirmation(references, force_bindings)
@@ -1573,6 +1627,8 @@ class TrainerDeckCore:
             bindings = self._strict_bindings()
             references = self._installation_binding_references(installation_id, target, bindings)
             self._validate_binding_removal_confirmation(references, force_bindings)
+            if dry_run:
+                return True
             shutil.rmtree(target)
             if references:
                 remaining = {key: value for key, value in bindings.items() if key not in references}

@@ -11,6 +11,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import { withTimeout } from "./async";
 import { deleteInstallation, listBindings, listInstalled } from "./backend";
+import { errorText } from "./errors";
 import { t } from "./i18n";
 import {
   installationBindingState,
@@ -36,14 +37,6 @@ export interface TrainerLibraryProps {
   onBind: (installation: InstalledTrainer) => Promise<boolean>;
   onOperationChange?: (busy: boolean) => void;
   alwaysExpanded?: boolean;
-}
-
-function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === "object" && "message" in error) {
-    return String(error.message);
-  }
-  return String(error);
 }
 
 function targetKey(target: SteamTarget | null): string {

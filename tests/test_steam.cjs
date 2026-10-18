@@ -252,6 +252,9 @@ const recoveryCompiled = ts.transpileModule(recoverySource, {
 const recoveryLoaded = { exports: {} };
 new Function("require", "module", "exports", recoveryCompiled)(
   (id) => {
+    if (id === "./errors") {
+      return { errorText: String };
+    }
     if (id === "./i18n") {
       return { t: (chinese) => chinese };
     }

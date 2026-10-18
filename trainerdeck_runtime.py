@@ -626,16 +626,27 @@ class TrainerRuntimeManager:
                     "修改器同步组件准备状态已变化，请重新添加修改器"
                 )
 
+    def _unused_installation_owner(self, folder: str) -> tuple[str, int | None]:
+        """Inspect session ownership while the caller holds _prepare_lock."""
+        key = self._installation_key(Path(folder))
+        owner = self._installation_owners.get(key)
+        session = self._sessions.get(owner) if owner is not None else None
+        if session is not None and session.get("connected"):
+            raise TrainerRuntimeError(
+                "这个修改器仍在运行，请退出游戏和修改器后再清理"
+            )
+        return key, owner
+
+    def check_unused_installation(self, folder: str, check: Callable[[], bool]) -> bool:
+        """Run the same preparation/session guard without changing ownership."""
+        with self._prepare_lock:
+            self._unused_installation_owner(folder)
+            return check()
+
     def delete_unused_installation(self, folder: str, delete: Callable[[], bool]) -> bool:
         """Serialize deletion with preparation; preparation alone is not use."""
         with self._prepare_lock:
-            key = self._installation_key(Path(folder))
-            owner = self._installation_owners.get(key)
-            session = self._sessions.get(owner) if owner is not None else None
-            if session is not None and session.get("connected"):
-                raise TrainerRuntimeError(
-                    "这个修改器仍在运行，请退出游戏和修改器后再清理"
-                )
+            key, owner = self._unused_installation_owner(folder)
             # The core validates bindings and checks OS processes as part of the
             # same deletion transaction. A revoked bridge can still be running,
             # so a missing connection alone must never authorize deletion.

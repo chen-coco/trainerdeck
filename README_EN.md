@@ -61,7 +61,7 @@ Do not use the automatically generated GitHub “Source code” archives as plug
 
 Version 0.8.1 moves My Trainer Library to Open Settings → My Trainer Library. Opening it immediately shows downloaded versions and game bindings without starting an automatic search or download. Start the target game, then bind an existing download without downloading again.
 
-Selecting Delete Files shows the folder and confirmation controls directly in the library entry. Version 0.8.3 adds Force Unbind and Delete for trainers with remaining binding records. After confirmation, it clears those records and deletes the local trainer files, including when the original game or Non-Steam shortcut has been removed and its launch options cannot be restored. Exit any running game and trainer before deleting files. Leaving the page does not silently cancel a confirmed deletion. Success and failure both produce a notification.
+Selecting Delete Files shows the folder and confirmation controls directly in the library entry. Force Unbind and Delete is available for trainers with remaining binding records. After confirmation, it clears those records and deletes the local trainer files, including when the original game or Non-Steam shortcut has been removed and its launch options cannot be restored. If the files are already missing, confirmed residual records are cleaned up; permission errors are not treated as missing files. Exit any game and trainer using these files before deleting them. Leaving the page does not silently cancel a confirmed deletion. Success and failure both produce a notification.
 
 Favorite options appear first. Filter by Chinese or English names and groups, show only favorites or enabled options, and collapse groups. Favorites are stored separately for each game and trainer file version; select them again after changing versions. Filtering and collapsing never change trainer option state or execute actions.
 
@@ -90,7 +90,7 @@ These automatic features are disabled by default. If TrainerDeck detects existin
 
 ## Recovery and Troubleshooting
 
-If the original game or Non-Steam shortcut has been deleted, open Manage and Restore Launch Options in settings and confirm Force Unbind for the old game. This removes the binding record and preserves trainer files without requiring the old game or writing its launch options. Start the reinstalled game, then reuse the download from My Trainer Library. To remove the files as well, confirm Force Unbind and Delete in the library. When the original game entry still exists, prefer normal launch option recovery before unbinding.
+If the original game or Non-Steam shortcut has been deleted, open Manage and Restore Launch Options in settings and select Restore for the old game first. Only after normal recovery fails can you confirm Force Recovery. This removes the binding record and preserves trainer files without restoring or changing Steam launch options. If the game still exists, check any remaining launch parameters manually. Start the reinstalled game, then reuse the download from My Trainer Library. To remove the files as well, confirm Force Unbind and Delete in the library.
 
 If a game no longer starts after binding, you do not need to launch the target game first. Open the TrainerDeck home page and select “Restore Launch Options.” TrainerDeck restores the saved launch options for the Steam game or non-Steam shortcut without deleting trainer files.
 
@@ -138,7 +138,7 @@ pnpm run package
 release/TrainerDeck-<version>.zip
 ```
 
-The current version produces `release/TrainerDeck-0.8.3.zip`.
+The current version produces `release/TrainerDeck-0.8.4.zip`.
 
 `TrainerDeckBridgeLauncher.exe` embeds both CLR2 and CLR4 Bridge payloads. At
 runtime it selects the payload whose metadata generation exactly matches the
