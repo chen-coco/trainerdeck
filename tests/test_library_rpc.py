@@ -7,6 +7,7 @@ process discovery; test_library.py separately exercises that scanner's inputs.
 """
 
 import asyncio
+import copy
 import hashlib
 import importlib.util
 import json
@@ -136,6 +137,77 @@ class LibraryRpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([record["id"] for record in remaining], [other["id"]])
         self.assertTrue(Path(other["executable"]).is_file())
 
+    def runtime_ownership(self):
+        runtime = self.plugin.runtime
+        return copy.deepcopy({
+            "prepared": runtime._prepared,
+            "tokens": runtime._tokens,
+            "owned_installations": runtime._owned_installations,
+            "installation_owners": runtime._installation_owners,
+            "sessions": runtime._sessions,
+            "revisions": runtime._revisions,
+        })
+
+    async def test_deletion_check_uses_real_guards_without_mutating_files_records_or_runtime(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        core = self.plugin._ensure_core()
+        before_bindings = core.bindings_path.read_bytes()
+        before_runtime = self.runtime_ownership()
+        with mock.patch("trainerdeck_core.shutil.rmtree", side_effect=AssertionError("check deleted files")) as remove:
+            with mock.patch("trainerdeck_core._atomic_write_json", side_effect=AssertionError("check saved records")) as write:
+                ordinary = await self.plugin.check_installation_deletion(installed["id"], installed["folder"])
+                self.assertFalse(ordinary["can_delete"])
+                self.assertIn("绑定", ordinary["error"])
+                self.assertEqual(await self.plugin.check_installation_deletion(installed["id"], installed["folder"], [snapshot]), {"can_delete": True, "error": ""})
+                with mock.patch.object(core, "_assert_installation_not_running", side_effect=TrainerDeckError("无法确认 Wine 进程（PID 987，进程 wineserver）")):
+                    blocked = await self.plugin.check_installation_deletion(installed["id"], installed["folder"], [snapshot])
+                    self.assertFalse(blocked["can_delete"])
+                    self.assertIn("PID 987", blocked["error"])
+        remove.assert_not_called()
+        write.assert_not_called()
+        self.assertEqual(core.bindings_path.read_bytes(), before_bindings)
+        self.assertEqual(self.runtime_ownership(), before_runtime)
+        self.assertTrue(Path(installed["executable"]).is_file())
+
+    async def test_deletion_check_of_missing_directory_does_not_remove_orphan_or_revoke_runtime(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        core = self.plugin._ensure_core()
+        before_bindings = core.bindings_path.read_bytes()
+        before_runtime = self.runtime_ownership()
+        shutil.rmtree(installed["folder"])
+        with mock.patch("trainerdeck_core.shutil.rmtree", side_effect=AssertionError("check deleted files")) as remove:
+            with mock.patch("trainerdeck_core._atomic_write_json", side_effect=AssertionError("check saved records")) as write:
+                self.assertEqual(await self.plugin.check_installation_deletion(installed["id"], installed["folder"], [snapshot]), {"can_delete": True, "error": ""})
+        remove.assert_not_called()
+        write.assert_not_called()
+        self.assertEqual(core.bindings_path.read_bytes(), before_bindings)
+        self.assertEqual(self.runtime_ownership(), before_runtime)
+
+    async def test_deletion_check_keeps_runtime_session_guard_and_operation_serialization(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        before_runtime = self.runtime_ownership()
+        with mock.patch.dict(self.plugin.runtime._sessions, {1234: {"connected": True}}):
+            blocked = await self.plugin.check_installation_deletion(installed["id"], installed["folder"], [snapshot])
+            self.assertFalse(blocked["can_delete"])
+            self.assertIn("仍在运行", blocked["error"])
+            self.assertTrue(self.plugin.runtime._sessions[1234]["connected"])
+        await self.plugin._installation_operation_lock.acquire()
+        check = asyncio.create_task(self.plugin.check_installation_deletion(installed["id"], installed["folder"], [snapshot]))
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(check.done())
+        finally:
+            self.plugin._installation_operation_lock.release()
+        self.assertEqual(await check, {"can_delete": True, "error": ""})
+        self.assertEqual(self.runtime_ownership(), before_runtime)
+        self.assertTrue(Path(installed["executable"]).is_file())
+
     async def test_prepared_bound_then_recovered_installation_deletes_without_reload(self):
         installed = await self.download()
         await self.prepare_and_bind(installed)
@@ -240,6 +312,63 @@ class LibraryRpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(1234, self.plugin.runtime._tokens)
         self.assertNotIn(1234, self.plugin.runtime._owned_installations)
         self.assertEqual(self.plugin.runtime._installation_owners, {})
+
+    async def test_force_cleanup_of_missing_directory_requires_snapshot_and_releases_runtime(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        core = self.plugin._ensure_core()
+        before = core.bindings_path.read_bytes()
+        shutil.rmtree(installed["folder"])
+        self.assertEqual(await self.plugin.list_installed(), [])
+        self.assertEqual(core.bindings_path.read_bytes(), before)
+        with self.assertRaisesRegex(TrainerDeckError, "绑定"):
+            await self.plugin.delete_installation(installed["id"], installed["folder"])
+        with self.assertRaisesRegex(TrainerDeckError, "记录已变化"):
+            await self.plugin.delete_installation(installed["id"], installed["folder"], [dict(snapshot, bound_at="old")])
+        self.assertEqual(core.bindings_path.read_bytes(), before)
+        self.assertTrue(await self.plugin.delete_installation(installed["id"], installed["folder"], [snapshot]))
+        self.assertEqual(await self.plugin.list_bindings(), [])
+        self.assertEqual(self.plugin.runtime._installation_owners, {})
+        self.assertNotIn(1234, self.plugin.runtime._prepared)
+        self.assertNotIn(1234, self.plugin.runtime._tokens)
+        self.assertTrue(await self.plugin.delete_installation(installed["id"], installed["folder"]))
+
+    async def test_missing_executable_remainder_is_removed_with_exact_binding_confirmation(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        Path(installed["executable"]).unlink()
+        self.assertEqual(await self.plugin.list_installed(), [])
+        self.assertTrue(Path(installed["folder"]).is_dir())
+        self.assertTrue(await self.plugin.delete_installation(installed["id"], installed["folder"], [snapshot]))
+        self.assertFalse(Path(installed["folder"]).exists())
+        self.assertEqual(await self.plugin.list_bindings(), [])
+        self.assertEqual(self.plugin.runtime._installation_owners, {})
+
+    async def test_missing_files_do_not_bypass_connected_runtime_or_permission_guards(self):
+        installed = await self.download()
+        await self.prepare_and_bind(installed)
+        snapshot = await self.binding_snapshot()
+        core = self.plugin._ensure_core()
+        before = core.bindings_path.read_bytes()
+        shutil.rmtree(installed["folder"])
+        with mock.patch.dict(self.plugin.runtime._sessions, {1234: {"connected": True}}):
+            with self.assertRaisesRegex(TrainerRuntimeError, "仍在运行"):
+                await self.plugin.delete_installation(installed["id"], installed["folder"], [snapshot])
+        original = core._reject_link
+
+        def reject(path):
+            if path == Path(installed["folder"]):
+                raise PermissionError("target permissions are unknown")
+            return original(path)
+
+        with mock.patch.object(core, "_reject_link", side_effect=reject):
+            with self.assertRaisesRegex(TrainerDeckError, "target permissions are unknown"):
+                await self.plugin.delete_installation(installed["id"], installed["folder"], [snapshot])
+        self.assertEqual(core.bindings_path.read_bytes(), before)
+        self.assertIn(1234, self.plugin.runtime._prepared)
+        self.assertIn(1234, self.plugin.runtime._tokens)
 
     async def test_force_delete_cannot_bypass_connected_or_os_process_protection(self):
         installed = await self.download()

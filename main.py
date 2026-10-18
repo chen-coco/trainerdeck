@@ -163,7 +163,7 @@ class Plugin:
                 pass
         return {
             "ok": self.core is not None,
-            "version": "0.8.3",
+            "version": "0.8.4",
             "python_version": sys.version.split()[0],
             "core_ready": self.core is not None,
             "core_error": self.core_start_error,
@@ -200,6 +200,44 @@ class Plugin:
         core = self._ensure_core()
         return await asyncio.to_thread(core.list_installed)
 
+    def _assert_deletion_sessions_idle(self, force_bindings: list[dict] | None):
+        # A historical candidate path can reference this folder while the
+        # same binding now runs another version. Both checks and deletion must
+        # refuse that live connection without revoking or otherwise editing it.
+        if self.runtime is not None and isinstance(force_bindings, list):
+            for snapshot in force_bindings:
+                if (
+                    isinstance(snapshot, dict)
+                    and type(snapshot.get("app_id")) is int
+                    and self.runtime.get_snapshot(snapshot["app_id"]).get("connected")
+                ):
+                    raise TrainerDeckError("关联修改器仍在运行，请退出游戏和修改器后再清理")
+
+    async def check_installation_deletion(
+        self, installation_id: str, folder: str,
+        force_bindings: list[dict] | None = None,
+    ) -> dict[str, Any]:
+        """Read-only diagnostic using the exact deletion guards, not a reservation."""
+        try:
+            core = self._ensure_core()
+
+            def check():
+                self._assert_deletion_sessions_idle(force_bindings)
+                return core.delete_installation(
+                    installation_id, folder, force_bindings, dry_run=True,
+                )
+
+            async with self._installation_operation_lock:
+                if self.runtime is not None:
+                    await asyncio.to_thread(
+                        self.runtime.check_unused_installation, folder, check,
+                    )
+                else:
+                    await asyncio.to_thread(check)
+            return {"can_delete": True, "error": ""}
+        except Exception as error:
+            return {"can_delete": False, "error": str(error)}
+
     async def delete_installation(
         self, installation_id: str, folder: str,
         force_bindings: list[dict] | None = None,
@@ -207,17 +245,7 @@ class Plugin:
         core = self._ensure_core()
 
         def remove():
-            # A historical candidate path can reference this folder while the
-            # same binding now runs another version. Do not revoke its live
-            # connection as a side effect of forcing the old files away.
-            if self.runtime is not None and isinstance(force_bindings, list):
-                for snapshot in force_bindings:
-                    if (
-                        isinstance(snapshot, dict)
-                        and type(snapshot.get("app_id")) is int
-                        and self.runtime.get_snapshot(snapshot["app_id"]).get("connected")
-                    ):
-                        raise TrainerDeckError("关联修改器仍在运行，请退出游戏和修改器后再清理")
+            self._assert_deletion_sessions_idle(force_bindings)
             return core.delete_installation(installation_id, folder, force_bindings)
 
         async with self._installation_operation_lock:

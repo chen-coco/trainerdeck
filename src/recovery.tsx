@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { withTimeout } from "./async";
 import { forgetTrainerBinding, listBindings, unbindTrainer } from "./backend";
+import { errorText } from "./errors";
 import { t } from "./i18n";
 import {
   readAppDetails,
@@ -16,10 +17,6 @@ export const RECOVERY_ROUTE = "/trainerdeck/settings/launch-options";
 
 const BACKEND_TIMEOUT_MS = 8000;
 const STEAM_READ_TIMEOUT_MS = 5000;
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function launchOptionsEqual(left: string, right: string): boolean {
   return left.trim() === right.trim();
@@ -181,7 +178,10 @@ export function TrainerDeckRecoveryPage() {
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<number | "all" | `forget:${number}` | null>(null);
-  const [confirmation, setConfirmation] = useState<TrainerBindingRecord | null>(null);
+  const [confirmation, setConfirmation] = useState<{
+    record: TrainerBindingRecord;
+    reason: string;
+  } | null>(null);
   const loadRequest = useRef(0);
   const mounted = useRef(false);
   const operationLock = useRef(false);
@@ -236,6 +236,9 @@ export function TrainerDeckRecoveryPage() {
       return;
     }
     operationLock.current = true;
+    pendingForget.current = null;
+    setConfirmation(null);
+    setMessage("");
     setBusy(record.app_id);
     try {
       await restoreTrainerLaunchBinding(record);
@@ -248,6 +251,12 @@ export function TrainerDeckRecoveryPage() {
       });
       await load();
     } catch (error) {
+      if (mounted.current) {
+        // Only a failed ordinary recovery can offer this destructive fallback.
+        // Keep the exact failed record for the backend's identity validation.
+        pendingForget.current = { ...record };
+        setConfirmation({ record: pendingForget.current, reason: errorText(error) });
+      }
       toaster.toast({
         title: t("恢复失败", "Recovery failed"),
         body: errorText(error),
@@ -263,6 +272,9 @@ export function TrainerDeckRecoveryPage() {
       return;
     }
     operationLock.current = true;
+    pendingForget.current = null;
+    setConfirmation(null);
+    setMessage("");
     setBusy("all");
     const failed: string[] = [];
     let restored = 0;
@@ -300,13 +312,6 @@ export function TrainerDeckRecoveryPage() {
     }
   }, [load, pendingRecords]);
 
-  const confirmForget = useCallback((record: TrainerBindingRecord) => {
-    if (operationLock.current || !mounted.current) return;
-    pendingForget.current = { ...record };
-    setConfirmation(pendingForget.current);
-    setMessage("");
-  }, []);
-
   const cancelForget = useCallback(() => {
     pendingForget.current = null;
     setConfirmation(null);
@@ -332,7 +337,7 @@ export function TrainerDeckRecoveryPage() {
         throw new Error(t("绑定记录已变化或不存在，请刷新后重试。", "The binding record changed or no longer exists. Refresh and retry."));
       }
       toaster.toast({
-        title: t("已强制解除绑定", "Binding record removed"),
+        title: t("绑定记录已清除", "Binding record removed"),
         body: t(
           `${recordName(record)}：修改器文件已保留，未修改 Steam 启动项。`,
           `${recordName(record)}: trainer files were preserved. Steam launch options were not changed.`,
@@ -341,7 +346,7 @@ export function TrainerDeckRecoveryPage() {
       await load();
     } catch (error) {
       if (mounted.current) setMessage(errorText(error));
-      toaster.toast({ title: t("强制解除绑定失败", "Could not remove binding record"), body: errorText(error) });
+      toaster.toast({ title: t("强制恢复失败", "Could not remove binding record"), body: errorText(error) });
     } finally {
       operationLock.current = false;
       if (mounted.current) setBusy(null);
@@ -439,48 +444,41 @@ export function TrainerDeckRecoveryPage() {
               disabled={busy !== null || record.launch_options_restored}
               onClick={() => void restoreOne(record)}
             >
-              {busy === record.app_id
-                ? t(
-                  `正在恢复 ${recordName(record)}…`,
-                  `Restoring ${recordName(record)}…`,
-                )
-                : record.launch_options_restored
-                  ? t(
-                    `${recordName(record)} · 已恢复`,
-                    `${recordName(record)} · Restored`,
-                  )
-                  : t(
-                    `恢复 ${recordName(record)}`,
-                    `Restore ${recordName(record)}`,
-                  )}
-            </ButtonItem>
-            <ButtonItem
-              layout="below"
-              description={t(
-                "游戏已删除或旧快捷方式失效时，可删除绑定记录并保留修改器文件。此操作无法恢复原启动项。",
-                "If the game was deleted or its old shortcut no longer works, remove the binding record and keep trainer files. This cannot restore the original launch options.",
-              )}
-              disabled={busy !== null}
-              onClick={() => confirmForget(record)}
-            >
               {busy === `forget:${record.app_id}`
-                ? t("正在强制解除…", "Removing binding record…")
-                : t("强制解除绑定 / 删除记录", "Force Unbind / Remove Record")}
+                ? t("正在强制恢复…", "Removing binding record…")
+                : busy === record.app_id
+                  ? t(
+                    `正在恢复 ${recordName(record)}…`,
+                    `Restoring ${recordName(record)}…`,
+                  )
+                  : record.launch_options_restored
+                    ? t(
+                      `${recordName(record)} · 已恢复`,
+                      `${recordName(record)} · Restored`,
+                    )
+                    : t(
+                      `恢复 ${recordName(record)}`,
+                      `Restore ${recordName(record)}`,
+                    )}
             </ButtonItem>
-            {confirmation?.app_id === record.app_id && <div
+            {confirmation?.record.app_id === record.app_id && <div
               role="group"
-              aria-label={t("确认强制解除绑定", "Confirm forced unbinding")}
+              aria-label={t("确认强制恢复", "Confirm forced recovery")}
               style={{ border: "1px solid #d9a34b", borderRadius: "4px", padding: "10px", margin: "8px 0 12px", fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }}
             >
-              <div>{recordName(confirmation)} · AppID {confirmation.app_id}</div>
-              {confirmation.shortcut_exe && <div>{confirmation.shortcut_exe}</div>}
+              <div>{recordName(confirmation.record)} · AppID {confirmation.record.app_id}</div>
+              {confirmation.record.shortcut_exe && <div>{confirmation.record.shortcut_exe}</div>}
               <p>{t(
-                "将删除此绑定记录并保留修改器文件，不会恢复或修改 Steam 启动项。适用于游戏已删除或旧快捷方式失效；如果游戏仍存在，建议先正常恢复启动项。删除后可将修改器重新绑定到新游戏。",
-                "This removes the binding record and keeps trainer files, without restoring or changing Steam launch options. Use it for a deleted game or an invalid old shortcut. If the game still exists, restore its launch options first. You can then bind the trainer to your new game.",
+                `正常恢复失败：${confirmation.reason}`,
+                `Ordinary recovery failed: ${confirmation.reason}`,
+              )}</p>
+              <p>{t(
+                "仅当游戏已删除或旧快捷方式失效时选择强制恢复。此操作只清除插件绑定记录并保留修改器文件，不会恢复或修改 Steam 启动项；如果游戏仍存在，残留启动参数需要手动检查。清除后可重新绑定修改器。",
+                "Choose forced recovery only for a deleted game or an invalid old shortcut. This only removes the plugin binding record and keeps trainer files, without restoring or changing Steam launch options. If the game still exists, check any remaining launch parameters manually. You can then bind the trainer again.",
               )}</p>
               <Focusable style={{ display: "flex", gap: "8px" }}>
                 <DialogButton style={{ minWidth: 0, flex: 1 }} disabled={busy !== null} onClick={() => void forgetOne()}>
-                  {t("强制解除（保留文件）", "Remove Record (Keep Files)")}
+                  {t("强制恢复", "Force Recovery")}
                 </DialogButton>
                 <DialogButton style={{ minWidth: 0, flex: 1 }} disabled={busy !== null} onClick={cancelForget}>
                   {t("取消", "Cancel")}

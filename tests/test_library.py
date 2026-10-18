@@ -247,6 +247,166 @@ class LibraryCoreTests(unittest.TestCase):
         self.assertEqual(self.core.bindings_path.read_bytes(), before)
         self.assertTrue(self.core.forget_trainer_binding(12, confirmed[0]["installation_id"], confirmed[0]["bound_at"]))
 
+    def test_missing_directory_cleans_only_explicitly_confirmed_binding_records(self):
+        selected = self.install()
+        other = self.install("v2", "c" * 24)
+        self.core.bind_trainer(12, selected["id"], installation_folder=selected["folder"])
+        self.core.bind_trainer(13, other["id"], installation_folder=other["folder"])
+        confirmed = [self.snapshot(12)]
+        before = self.core.bindings_path.read_bytes()
+        shutil.rmtree(selected["folder"])
+        for confirmation in [None, [], [dict(confirmed[0], bound_at="stale")]]:
+            with self.subTest(confirmation=confirmation), self.assertRaises(TrainerDeckError):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmation)
+            self.assertEqual(self.core.bindings_path.read_bytes(), before)
+        self.assertTrue(self.core.delete_installation(selected["id"], selected["folder"], confirmed))
+        self.assertEqual([row["app_id"] for row in self.core.list_binding_records()], [13])
+        self.assertTrue(Path(other["executable"]).is_file())
+        self.assertTrue(self.core.delete_installation(selected["id"], selected["folder"]))
+
+    def test_missing_directory_cleanup_does_not_treat_permission_failure_as_absence(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        before = self.core.bindings_path.read_bytes()
+        shutil.rmtree(selected["folder"])
+        original = self.core._reject_link
+
+        def reject(path):
+            if path == Path(selected["folder"]):
+                raise PermissionError("cannot inspect target")
+            return original(path)
+
+        with patch.object(self.core, "_reject_link", side_effect=reject):
+            with self.assertRaisesRegex(TrainerDeckError, "cannot inspect target"):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmed)
+        self.assertEqual(self.core.bindings_path.read_bytes(), before)
+
+    def test_missing_directory_recreated_before_cleanup_keeps_binding_records(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        before = self.core.bindings_path.read_bytes()
+        shutil.rmtree(selected["folder"])
+        original = self.core._validate_binding_removal_confirmation
+
+        def recreate(*arguments):
+            original(*arguments)
+            Path(selected["folder"]).mkdir()
+
+        with patch.object(self.core, "_validate_binding_removal_confirmation", side_effect=recreate):
+            with self.assertRaisesRegex(TrainerDeckError, "重新出现"):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmed)
+        self.assertEqual(self.core.bindings_path.read_bytes(), before)
+        self.assertTrue(Path(selected["folder"]).is_dir())
+
+    def test_missing_directory_with_linked_ancestor_is_not_authorized_for_cleanup(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        before = self.core.bindings_path.read_bytes()
+        shutil.rmtree(selected["folder"])
+        original = self.core._reject_link
+
+        def reject(path):
+            if path == Path(selected["folder"]).parent:
+                raise TrainerDeckError("安装目录包含符号链接")
+            return original(path)
+
+        with patch.object(self.core, "_reject_link", side_effect=reject):
+            with self.assertRaisesRegex(TrainerDeckError, "符号链接"):
+                self.core.delete_installation(selected["id"], selected["folder"], confirmed)
+        self.assertEqual(self.core.bindings_path.read_bytes(), before)
+
+    def test_missing_executable_still_allows_cleanup_of_valid_managed_remainders(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        Path(selected["executable"]).unlink()
+        before = self.core.bindings_path.read_bytes()
+        with self.assertRaises(TrainerDeckError):
+            self.core.delete_installation(selected["id"], selected["folder"])
+        self.assertEqual(self.core.bindings_path.read_bytes(), before)
+        self.assertEqual(self.core.list_installed(), [])
+        self.assertEqual(self.core.bindings_path.read_bytes(), before, "Listing must not discard recovery records")
+        self.assertTrue(self.core.delete_installation(selected["id"], selected["folder"], confirmed))
+        self.assertFalse(Path(selected["folder"]).exists())
+        self.assertEqual(self.core.list_binding_records(), [])
+
+    def test_missing_executable_keeps_process_and_directory_tree_protections(self):
+        selected = self.install()
+        Path(selected["executable"]).unlink()
+        with patch.object(self.core, "_assert_installation_not_running", side_effect=TrainerDeckError("仍在运行")):
+            with self.assertRaisesRegex(TrainerDeckError, "仍在运行"):
+                self.core.delete_installation(selected["id"], selected["folder"])
+        self.assertTrue(Path(selected["folder"]).is_dir())
+        outside = self.home / "keep.txt"
+        outside.write_text("keep", encoding="utf-8")
+        os.link(outside, Path(selected["folder"]) / "linked.txt")
+        with self.assertRaisesRegex(TrainerDeckError, "外部关联"):
+            self.core.delete_installation(selected["id"], selected["folder"])
+        self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+
+    def test_unreadable_executable_is_not_treated_as_missing(self):
+        selected = self.install()
+        original = self.core._reject_link
+
+        def reject(path):
+            if path == Path(selected["executable"]):
+                raise PermissionError("cannot inspect executable")
+            return original(path)
+
+        with patch.object(self.core, "_reject_link", side_effect=reject):
+            with self.assertRaisesRegex(TrainerDeckError, "cannot inspect executable"):
+                self.core.delete_installation(selected["id"], selected["folder"])
+        self.assertTrue(Path(selected["executable"]).is_file())
+
+    def test_delete_dry_run_validates_without_deleting_files_or_binding_records(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        before = self.core.bindings_path.read_bytes()
+        with patch("trainerdeck_core.shutil.rmtree", side_effect=AssertionError("dry run deleted files")) as remove:
+            with patch("trainerdeck_core._atomic_write_json", side_effect=AssertionError("dry run saved records")) as write:
+                with self.assertRaisesRegex(TrainerDeckError, "绑定"):
+                    self.core.delete_installation(selected["id"], selected["folder"], dry_run=True)
+                self.assertTrue(self.core.delete_installation(selected["id"], selected["folder"], confirmed, dry_run=True))
+                with patch.object(self.core, "_assert_installation_not_running", side_effect=TrainerDeckError("Wine 仍在运行（PID 123）")):
+                    with self.assertRaisesRegex(TrainerDeckError, "PID 123"):
+                        self.core.delete_installation(selected["id"], selected["folder"], confirmed, dry_run=True)
+        remove.assert_not_called()
+        write.assert_not_called()
+        self.assertEqual(self.core.bindings_path.read_bytes(), before)
+        self.assertTrue(Path(selected["executable"]).is_file())
+
+    def test_delete_dry_run_missing_directory_keeps_confirmed_orphan_records(self):
+        selected = self.install()
+        self.core.bind_trainer(12, selected["id"])
+        confirmed = [self.snapshot(12)]
+        before = self.core.bindings_path.read_bytes()
+        shutil.rmtree(selected["folder"])
+        with patch("trainerdeck_core.shutil.rmtree", side_effect=AssertionError("dry run deleted files")) as remove:
+            with patch("trainerdeck_core._atomic_write_json", side_effect=AssertionError("dry run saved records")) as write:
+                self.assertTrue(self.core.delete_installation(selected["id"], selected["folder"], confirmed, dry_run=True))
+                with self.assertRaisesRegex(TrainerDeckError, "记录已变化"):
+                    self.core.delete_installation(selected["id"], selected["folder"], [dict(confirmed[0], bound_at="old")], dry_run=True)
+        remove.assert_not_called()
+        write.assert_not_called()
+        self.assertEqual(self.core.bindings_path.read_bytes(), before)
+        self.assertFalse(Path(selected["folder"]).exists())
+
+    def test_delete_dry_run_keeps_directory_tree_safety_checks(self):
+        selected = self.install()
+        outside = self.home / "keep-dry-run.txt"
+        outside.write_text("keep", encoding="utf-8")
+        os.link(outside, Path(selected["folder"]) / "linked.txt")
+        with patch("trainerdeck_core.shutil.rmtree", side_effect=AssertionError("dry run deleted files")) as remove:
+            with self.assertRaisesRegex(TrainerDeckError, "外部关联"):
+                self.core.delete_installation(selected["id"], selected["folder"], dry_run=True)
+        remove.assert_not_called()
+        self.assertTrue(Path(selected["executable"]).is_file())
+        self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+
     def test_binding_duplicate_download_keeps_the_exact_selected_folder(self):
         selected = self.install()
         duplicate = self.install("v1-2")
@@ -359,6 +519,51 @@ class InstallationProcessInspectionTests(unittest.TestCase):
         with self.assertRaisesRegex(TrainerDeckError, "仍在运行"):
             self.inspect()
 
+    def test_missing_executable_without_live_processes_is_not_a_permanent_block(self):
+        self.executable.unlink()
+        self.inspect()
+
+    def test_missing_executable_protects_any_same_name_cache_generation(self):
+        self.executable.unlink()
+        cached = f"C:\\users\\steamuser\\AppData\\Local\\TrainerDeck\\BridgeCache\\{'f' * 16}-a123-s{'a' * 16}\\{self.executable.name}"
+        self.process(cached + "\0", comm="unrelated")
+        with self.assertRaisesRegex(TrainerDeckError, "仍在运行"):
+            self.inspect()
+
+    def test_missing_executable_protects_bare_same_name_and_launcher_processes(self):
+        self.executable.unlink()
+        for command in (self.executable.name, "TrainerDeckBridgeLauncher.exe"):
+            with self.subTest(command=command):
+                self.process(command + "\0", comm=command[:15])
+                with self.assertRaisesRegex(TrainerDeckError, "仍在运行"):
+                    self.inspect()
+
+    def test_missing_executable_still_protects_original_deleted_working_directory(self):
+        self.executable.unlink()
+        process = self.process("unrelated.exe\0", comm="unrelated.exe")
+        original = os.readlink
+
+        def readlink(path, *arguments, **keywords):
+            if Path(path) == process / "cwd":
+                return str(self.folder) + " (deleted)"
+            return original(path, *arguments, **keywords)
+
+        with patch("trainerdeck_core.os.readlink", side_effect=readlink):
+            with self.assertRaisesRegex(TrainerDeckError, "仍在运行"):
+                self.inspect()
+
+    def test_unreadable_executable_file_does_not_bypass_process_inspection(self):
+        original = Path.open
+
+        def open_file(path, *arguments, **keywords):
+            if path == self.executable:
+                raise PermissionError("EXE cannot be inspected")
+            return original(path, *arguments, **keywords)
+
+        with patch.object(Path, "open", open_file):
+            with self.assertRaisesRegex(TrainerDeckError, "无法检查修改器进程"):
+                self.inspect()
+
     def test_manifest_and_proton_command_environment_are_protected(self):
         for name, value in [
             ("TRAINERDECK_BRIDGE_MANIFEST", str(self.folder / "trainerdeck-bridge.json")),
@@ -427,6 +632,56 @@ class InstallationProcessInspectionTests(unittest.TestCase):
 
         with patch.object(Path, "open", open_file):
             with self.assertRaisesRegex(TrainerDeckError, "Wine 进程"):
+                self.inspect()
+
+    def test_unrelated_wine_with_readable_command_and_inaccessible_cwd_environment_does_not_block(self):
+        process = self.process("wineserver\0-p0\0", comm="wineserver")
+        original_open = Path.open
+        original_readlink = os.readlink
+
+        def open_file(path, *arguments, **keywords):
+            if path == process / "environ":
+                raise PermissionError("Wine environment cannot be inspected")
+            return original_open(path, *arguments, **keywords)
+
+        def readlink(path, *arguments, **keywords):
+            if Path(path) in (process / "cwd", process / "exe"):
+                raise PermissionError("Wine working directory cannot be inspected")
+            return original_readlink(path, *arguments, **keywords)
+
+        with patch.object(Path, "open", open_file), patch("trainerdeck_core.os.readlink", side_effect=readlink):
+            self.inspect()
+
+    def test_matching_launcher_with_readable_command_and_inaccessible_cwd_environment_still_blocks(self):
+        process = self.process("wine64\0TrainerDeckBridgeLauncher.exe\0", comm="TrainerDeckBrid")
+        original_open = Path.open
+        original_readlink = os.readlink
+
+        def open_file(path, *arguments, **keywords):
+            if path == process / "environ":
+                raise PermissionError("Launcher environment cannot be inspected")
+            return original_open(path, *arguments, **keywords)
+
+        def readlink(path, *arguments, **keywords):
+            if Path(path) in (process / "cwd", process / "exe"):
+                raise PermissionError("Launcher working directory cannot be inspected")
+            return original_readlink(path, *arguments, **keywords)
+
+        with patch.object(Path, "open", open_file), patch("trainerdeck_core.os.readlink", side_effect=readlink):
+            with self.assertRaisesRegex(TrainerDeckError, "无法确认修改器.*PID 123"):
+                self.inspect()
+
+    def test_unrelated_wine_with_unreadable_command_still_blocks(self):
+        process = self.process("wineserver\0", comm="wineserver")
+        original = Path.open
+
+        def open_file(path, *arguments, **keywords):
+            if path == process / "cmdline":
+                raise PermissionError("Wine command cannot be inspected")
+            return original(path, *arguments, **keywords)
+
+        with patch.object(Path, "open", open_file):
+            with self.assertRaisesRegex(TrainerDeckError, "Wine 进程.*PID 123"):
                 self.inspect()
 
     def test_known_different_wine_executable_with_unreadable_environment_does_not_block(self):
